@@ -1,0 +1,6 @@
+
+
+interface IRewardCalculator
+{
+    float CalculateReward();
+}
