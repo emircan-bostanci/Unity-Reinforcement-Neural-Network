@@ -18,12 +18,17 @@ public class GeneticAlgorithmManager : MonoBehaviour
     public float autoSaveInterval = 3600f;
     public string saveDirectory = "SavedModels";
     
+    [Header("Display Settings")]
+    public bool showProgressUpdates = true;
+    public float progressUpdateInterval = 15f; // Show progress every 15 seconds (reduced frequency)
+    
     [Header("References")]
     public Envirovment environment;
     public Agent[] agents;
     
     private float generationTimer = 0f;
     private float autoSaveTimer = 0f;
+    private float progressTimer = 0f; // Timer for progress updates
     private int currentGeneration = 0;
     private List<AgentFitness> agentFitnessScores;
     private bool isEvolving = false;
@@ -75,20 +80,47 @@ public class GeneticAlgorithmManager : MonoBehaviour
         
         generationTimer += Time.deltaTime;
         autoSaveTimer += Time.deltaTime;
+        progressTimer += Time.deltaTime;
+        
+        // Show progress updates periodically
+        if (showProgressUpdates && progressTimer >= progressUpdateInterval)
+        {
+            ShowProgressUpdate();
+            progressTimer = 0f;
+        }
         
         // Check for timeout-based evolution trigger
         bool timeoutTriggered = false;
-        if (environment != null && environment.timeSinceLastReward >= environment.noRewardTimeoutDuration)
+        bool immediateRestart = false;
+        if (environment != null && environment.GetEpisodeEnded())
         {
             timeoutTriggered = true;
+            
+            // Check if this is due to single agent remaining
+            int aliveCount = environment.GetAliveAgentCount();
+            if (aliveCount <= 1)
+            {
+                immediateRestart = true;
+                Debug.Log($"🔄 Immediate restart triggered - {aliveCount} agents remaining");
+            }
         }
         
         if (enableGeneticAlgorithm && !isEvolving && (generationTimer >= generationDuration || timeoutTriggered))
         {
-            if (timeoutTriggered)
+            if (immediateRestart)
             {
-                Debug.Log("=== TIMEOUT TRIGGERED EVOLUTION ===");
-                Debug.Log($"No meaningful rewards for {environment.timeSinceLastReward:F1}s, forcing generation evolution!");
+                Debug.Log("🏆 === WINNER DECIDED EVOLUTION ===");
+                Debug.Log("Single agent remaining, immediately starting new generation!");
+            }
+            else if (timeoutTriggered)
+            {
+                Debug.Log("🚨 === EPISODE ENDED EVOLUTION ===");
+                Debug.Log("Episode ended, forcing generation evolution!");
+            }
+            else
+            {
+                Debug.Log("⏰ === TIME-BASED EVOLUTION ===");
+                Debug.Log($"Generation duration ({generationDuration}s) reached, starting evolution!");
             }
             EvaluateGeneration();
         }
@@ -98,6 +130,35 @@ public class GeneticAlgorithmManager : MonoBehaviour
             AutoSaveAllModels();
             autoSaveTimer = 0f;
         }
+    }
+    
+    private void ShowProgressUpdate()
+    {
+        if (environment == null) return;
+        
+        TrainingManager trainingManager = FindFirstObjectByType<TrainingManager>();
+        
+        string progressInfo = $"🎯 Progress Update:";
+        
+        if (trainingManager != null && trainingManager.IsUsingGeneticAlgorithm())
+        {
+            progressInfo += $" Generation {currentGeneration}, Episode {trainingManager.GetCurrentEpisode()}";
+        }
+        else
+        {
+            progressInfo += $" Generation {currentGeneration}";
+        }
+        
+        progressInfo += $" | Time: {generationTimer:F1}/{generationDuration:F0}s ({GetGenerationProgress()*100:F0}%)";
+        progressInfo += $" | Alive: {environment.GetAliveAgentCount()}/{agents.Length}";
+        
+        if (agentFitnessScores != null && agentFitnessScores.Count > 0)
+        {
+            float avgFitness = agentFitnessScores.Average(a => a.fitness);
+            progressInfo += $" | Avg Fitness: {avgFitness:F2}";
+        }
+        
+        Debug.Log(progressInfo);
     }
     
     private void InitializeFitnessTracking()
@@ -122,7 +183,15 @@ public class GeneticAlgorithmManager : MonoBehaviour
     {
         isEvolving = true;
         
-        Debug.Log($"=== GENERATION {currentGeneration} EVALUATION (Duration: {generationTimer:F1}s) ===");
+        // Find TrainingManager for episode display
+        TrainingManager trainingManager = FindFirstObjectByType<TrainingManager>();
+        string episodeInfo = "";
+        if (trainingManager != null)
+        {
+            episodeInfo = $" Episode {trainingManager.GetCurrentEpisode()}";
+        }
+        
+        Debug.Log($"🧬 === GENERATION {currentGeneration}{episodeInfo} EVALUATION (Duration: {generationTimer:F1}s) ===");
         
         // Calculate fitness for each agent
         CalculateFitnessScores();
@@ -130,16 +199,16 @@ public class GeneticAlgorithmManager : MonoBehaviour
         // Calculate average fitness
         float averageFitness = agentFitnessScores.Average(a => a.fitness);
         
-        Debug.Log($"Generation {currentGeneration} completed - Average Fitness: {averageFitness:F3}");
+        Debug.Log($"📊 Generation {currentGeneration} completed - Average Fitness: {averageFitness:F3}");
         
         if (averageFitness < successThreshold)
         {
-            Debug.Log($"Poor performance detected (avg: {averageFitness:F3} < threshold: {successThreshold}). Evolving generation...");
+            Debug.Log($"⚠️ Poor performance detected (avg: {averageFitness:F3} < threshold: {successThreshold}). Evolving generation...");
             EvolvePopulation();
         }
         else
         {
-            Debug.Log($"Generation performing well (avg: {averageFitness:F3} >= threshold: {successThreshold}). Continuing without evolution.");
+            Debug.Log($"✅ Generation performing well (avg: {averageFitness:F3} >= threshold: {successThreshold}). Continuing without evolution.");
         }
         
         // Reset for next generation
@@ -149,7 +218,7 @@ public class GeneticAlgorithmManager : MonoBehaviour
         if (environment != null)
         {
             Debug.Log("🔄 RESETTING WORLD STATE: Reviving dead agents and resetting positions");
-            environment.Reset(); // This calls the full reset including positions and agent revival
+            environment.ResetEnvironment(); // This calls the full reset including positions and agent revival
         }
         
         currentGeneration++;
@@ -179,7 +248,8 @@ public class GeneticAlgorithmManager : MonoBehaviour
                 // Calculate composite fitness
                 fitness.fitness = CalculateCompositeFitness(fitness);
                 
-                Debug.Log($"Agent_{i}: Reward={fitness.totalReward:F1}, Kills={fitness.kills}, Survival={fitness.survivalTime:F1}s, Fitness={fitness.fitness:F3}, Alive={environment.IsAgentAlive(i)}");
+                string networkType = GetAgentNetworkType(agents[i]);
+                Debug.Log($"Agent_{i} ({networkType}): Reward={fitness.totalReward:F1}, Kills={fitness.kills}, Survival={fitness.survivalTime:F1}s, Fitness={fitness.fitness:F3}, Alive={environment.IsAgentAlive(i)}");
             }
         }
         
@@ -192,15 +262,15 @@ public class GeneticAlgorithmManager : MonoBehaviour
     
     private float CalculateCompositeFitness(AgentFitness fitness)
     {
-        float rewardWeight = 0.8f;  // Even higher weight for rewards since kills are now 200 points
+        float rewardWeight = 0.8f;  // High weight for normalized rewards
         float survivalWeight = 0.2f;
         
-        // Normalize rewards (updated for new reward scale: kills are +200, spotting +5)
-        // New range: roughly -200 to +600 (multiple kills possible at 200 each)
-        float normalizedReward = fitness.totalReward / 400f; // Updated normalization factor for 200 point kills
+        // Normalize rewards for the new [-1, +1] reward system
+        // The rewards are already normalized, so we can use them directly
+        float normalizedReward = Mathf.Clamp(fitness.totalReward, -1f, 1f);
         
-        // Give slight penalty for excessive timeout punishment
-        if (fitness.totalReward < -100f) // Likely accumulated timeout punishments
+        // Small penalty for excessive negative rewards (likely timeout punishments)
+        if (fitness.totalReward < -2f) // Multiple timeout punishments
         {
             normalizedReward = Mathf.Max(normalizedReward, -0.8f); // Cap penalty
             Debug.Log($"Agent_{fitness.agentIndex} has excessive timeout punishment, capping fitness penalty");
@@ -211,8 +281,8 @@ public class GeneticAlgorithmManager : MonoBehaviour
         
         float compositeFitness = (normalizedReward * rewardWeight) + (normalizedSurvival * survivalWeight);
         
-        // Ensure minimum fitness is not too negative
-        return Mathf.Max(compositeFitness, -1f);
+        // Ensure fitness is within reasonable bounds
+        return Mathf.Clamp(compositeFitness, -1f, 1f);
     }
     
     private void EvolvePopulation()
@@ -243,21 +313,63 @@ public class GeneticAlgorithmManager : MonoBehaviour
         Debug.Log($"Generation {currentGeneration} evolution completed!");
     }
     
+    private bool IsAgentNetworkReady(Agent agent)
+    {
+        if (agent == null) return false;
+        
+        switch (agent.networkType)
+        {
+            case Agent.NeuralNetworkType.SimpleNN:
+                return agent.simpleNetwork != null;
+            case Agent.NeuralNetworkType.LSTM_RNN:
+                return agent.lstmNetwork != null;
+            default:
+                return false;
+        }
+    }
+    
     private void CloneAndMutateAgent(int parentIndex, int childIndex)
     {
         if (parentIndex >= 0 && parentIndex < agents.Length && 
             childIndex >= 0 && childIndex < agents.Length)
         {
-            if (agents[parentIndex].policyNetwork != null && agents[childIndex].policyNetwork != null)
+            // Get the parent and child agents
+            Agent parentAgent = agents[parentIndex];
+            Agent childAgent = agents[childIndex];
+            
+            // Clone the network type from parent
+            childAgent.networkType = parentAgent.networkType;
+            
+            // Initialize the appropriate network for the child
+            switch (childAgent.networkType)
             {
-                agents[childIndex].policyNetwork = new SimpleNeuralNetwork();
-                agents[childIndex].policyNetwork.Initialize();
-                
-                Debug.Log($"Agent_{childIndex} evolved from Agent_{parentIndex}");
+                case Agent.NeuralNetworkType.SimpleNN:
+                    if (childAgent.simpleNetwork == null)
+                    {
+                        childAgent.simpleNetwork = new SimpleNeuralNetwork();
+                    }
+                    childAgent.simpleNetwork.Initialize();
+                    Debug.Log($"Agent_{childIndex} evolved from Agent_{parentIndex} using Simple NN");
+                    break;
+                    
+                case Agent.NeuralNetworkType.LSTM_RNN:
+                    // LSTM networks are initialized in the Agent's Start() method
+                    // We just need to ensure the settings are copied
+                    childAgent.lstmSequenceLength = parentAgent.lstmSequenceLength;
+                    childAgent.lstmHiddenSize = parentAgent.lstmHiddenSize;
+                    childAgent.resetLSTMOnDeath = parentAgent.resetLSTMOnDeath;
+                    Debug.Log($"Agent_{childIndex} evolved from Agent_{parentIndex} using LSTM RNN");
+                    break;
             }
         }
     }
     
+    private string GetAgentNetworkType(Agent agent)
+    {
+        if (agent == null) return "Unknown";
+        return agent.networkType == Agent.NeuralNetworkType.LSTM_RNN ? "LSTM" : "Simple";
+    }
+
     private void ResetGenerationTracking()
     {
         for (int i = 0; i < agentFitnessScores.Count; i++)
@@ -396,20 +508,47 @@ public class GeneticAlgorithmManager : MonoBehaviour
         }
     }
     
-    // Debug method to check timeout status
-    [ContextMenu("Check Timeout Status")]
+    // Debug method to check agent network status
+    [ContextMenu("Check Agent Networks")]
+    public void CheckAgentNetworks()
+    {
+        if (agents == null)
+        {
+            Debug.LogError("No agents array assigned!");
+            return;
+        }
+        
+        Debug.Log("=== AGENT NETWORK STATUS ===");
+        for (int i = 0; i < agents.Length; i++)
+        {
+            if (agents[i] != null)
+            {
+                string networkType = GetAgentNetworkType(agents[i]);
+                bool isReady = IsAgentNetworkReady(agents[i]);
+                Debug.Log($"Agent_{i}: Type={networkType}, Ready={isReady}");
+                
+                if (agents[i].networkType == Agent.NeuralNetworkType.LSTM_RNN)
+                {
+                    Debug.Log($"   LSTM Settings: Hidden={agents[i].lstmHiddenSize}, Sequence={agents[i].lstmSequenceLength}, ResetOnDeath={agents[i].resetLSTMOnDeath}");
+                }
+            }
+            else
+            {
+                Debug.LogError($"Agent_{i} is null!");
+            }
+        }
+    }
     public void CheckTimeoutStatus()
     {
         if (environment != null)
         {
-            Debug.Log($"=== TIMEOUT STATUS ===");
-            Debug.Log($"Time since last reward: {environment.timeSinceLastReward:F1}s / {environment.noRewardTimeoutDuration}s");
-            Debug.Log($"Has earned reward: {environment.hasEarnedRewardThisEpisode}");
-            Debug.Log($"Has been punished: {environment.hasBeenPunishedForTimeout}");
+            Debug.Log($"=== ENVIRONMENT STATUS ===");
+            Debug.Log($"Episode ended: {environment.GetEpisodeEnded()}");
+            Debug.Log($"Alive agents: {environment.GetAliveAgentCount()}");
             Debug.Log($"Generation timer: {generationTimer:F1}s / {generationDuration}s");
             
-            bool willTimeout = environment.timeSinceLastReward >= environment.noRewardTimeoutDuration;
-            Debug.Log($"Will trigger timeout evolution: {willTimeout}");
+            bool willTimeout = environment.GetEpisodeEnded();
+            Debug.Log($"Will trigger evolution: {willTimeout}");
         }
     }
 }

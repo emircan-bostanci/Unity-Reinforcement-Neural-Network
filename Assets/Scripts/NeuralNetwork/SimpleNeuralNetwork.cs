@@ -11,6 +11,9 @@ public class SimpleNeuralNetwork : INeuralNetwork
     public int hiddenSize2 = 64;
     public int outputSize = 5;  // 5 action parameters (continuous actions)
     public bool useValueNetwork = true;  // For Actor-Critic methods
+    
+    // INetworkInterface properties
+    public bool UseValueNetwork { get => useValueNetwork; set => useValueNetwork = value; }
 
     // Actor network weights and biases (for policy)
     private float[,] weightsInputHidden1;

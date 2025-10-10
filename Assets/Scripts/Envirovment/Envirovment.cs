@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections.Generic;
 
 public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 {
@@ -13,6 +14,14 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 
     [Header("Spawn Points")]
     public Transform[] spawnPoints; // Spawn points for all agents
+    
+    [Header("Dynamic Spawn Settings")]
+    public bool useDynamicSpawning = true;
+    public Vector2 spawnRangeX = new Vector2(-10f, 10f); // X range for random spawns
+    public Vector2 spawnRangeY = new Vector2(-10f, 10f); // Y range for random spawns
+    public float minSpawnDistance = 2f; // Minimum distance between spawn points
+    public bool generateSpawnPointsOnStart = true; // Auto-generate spawn points
+    public bool visualizeSpawnRange = true; // Show spawn range in editor
 
     [Header("Timeout Settings")]
     public float noRewardTimeoutDuration = 5f; // Punish after 5 seconds without reward
@@ -33,10 +42,22 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
     private bool[] agentShotNothing;
     private bool[] agentSpottedEnemy;
     private bool[] agentAlreadySpottedThisStep;
+    private bool[] agentHitByEnemy; // Track if agent was hit/killed by another agent
+    private float[] agentDistanceToNearestEnemy; // Track distance to nearest spotted enemy
+    private float[] agentPreviousDistanceToEnemy; // Previous distance for proximity rewards
     private int[] agentKills; // Track kills for each agent
     private bool[] agentIsAlive; // Track if agent is alive
     private float[] agentCumulativeRewards; // Track total rewards earned by each agent
     private float[] agentLastStepRewards; // Track last step reward for each agent
+    private bool[] agentHadMeaningfulMovement; // Track if agent had meaningful movement this step
+    
+    // Enhanced spotting tracking
+    private bool[] agentCurrentlySpottingEnemy; // Track if agent is currently seeing an enemy (this frame)
+    private bool[] agentWasSpottingEnemyLastFrame; // Track if agent was seeing an enemy last frame
+    private bool[] agentJustEnteredSpotting; // Track if agent just started spotting (raycast enter)
+    private bool[] agentFacingTowardEnemy; // Track if agent is facing toward spotted enemy
+    private bool[] agentAlreadyGotFacingBonus; // Track if agent already got facing bonus this spotting session
+    private bool[] agentSpottedByEnemy; // Track if agent is currently spotted by another agent
     
     // Timeout tracking (public for TrainingManager access)
     public float timeSinceLastReward;
@@ -58,98 +79,140 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         string rewardReason = "";
         string agentName = $"Agent_{agentIndex}";
 
-        // REWARD SYSTEM DESIGN:
-        // - POSITIVE rewards (+15, +50, +2): Reset timeout timer (meaningful progress)
-        // - NEGATIVE rewards (-10, -20, -5): Do NOT reset timeout timer (penalties)
-        // - TIMEOUT punishment (-30): Special case, does not reset timer
+        // NORMALIZED REWARD SYSTEM DESIGN (all rewards in [-1, +1] range):
+        // - POSITIVE rewards: Reset timeout timer (meaningful progress)
+        // - NEGATIVE rewards: Do NOT reset timeout timer (penalties) 
+        // - All rewards normalized for stable learning
         
-        // Check for timeout punishment first
+        // Check for timeout punishment first (normalized)
+        float normalizedTimeoutPunishment = -0.3f;
         if (enableTimeout && !resetOnTimeout && timeSinceLastReward >= noRewardTimeoutDuration && 
             !hasEarnedRewardThisEpisode && !hasBeenPunishedForTimeout)
         {
-            reward += timeoutPunishment;
-            rewardReason += $"Timeout punishment ({timeoutPunishment}) ";
+            reward += normalizedTimeoutPunishment;
+            rewardReason += $"Timeout punishment ({normalizedTimeoutPunishment:F2}) ";
             hasBeenPunishedForTimeout = true;
             lastTimeoutPunishmentTime = currentEpisodeTime;
-            Debug.Log($"{agentName} TIMEOUT PUNISHMENT! Agent idle for {timeSinceLastReward:F1} seconds, punishment: {timeoutPunishment}");
+            Debug.Log($"{agentName} TIMEOUT PUNISHMENT! Agent idle for {timeSinceLastReward:F1} seconds, punishment: {normalizedTimeoutPunishment:F2}");
         }
         
         // Additional punishment every 5 seconds of continued inactivity
         if (enableTimeout && !resetOnTimeout && hasBeenPunishedForTimeout && 
             (currentEpisodeTime - lastTimeoutPunishmentTime) >= noRewardTimeoutDuration)
         {
-            reward += timeoutPunishment * 0.5f; // Smaller repeated punishment
-            rewardReason += $"Continued timeout ({timeoutPunishment * 0.5f}) ";
+            float continuedPunishment = normalizedTimeoutPunishment * 0.5f;
+            reward += continuedPunishment;
+            rewardReason += $"Continued timeout ({continuedPunishment:F2}) ";
             lastTimeoutPunishmentTime = currentEpisodeTime;
-            Debug.Log($"{agentName} CONTINUED TIMEOUT! Additional punishment: {timeoutPunishment * 0.5f}");
+            Debug.Log($"{agentName} CONTINUED TIMEOUT! Additional punishment: {continuedPunishment:F2}");
         }
 
-        // Enemy spotting reward (encourage seeking behavior) - ONLY for actual enemy agents, not walls
-        if (agentSpottedEnemy[agentIndex] && !agentAlreadySpottedThisStep[agentIndex])
+        // STRICT EVENT-BASED REWARD SYSTEM - NO CONTINUOUS REWARDS ALLOWED
+        
+        // 1. Raycast enter bonus - ONE-TIME reward when first spotting enemy
+        if (agentJustEnteredSpotting[agentIndex])
         {
-            reward += 5f;
-            rewardReason += "Spotted enemy agent (+5) ";
-            agentAlreadySpottedThisStep[agentIndex] = true; // Prevent multiple rewards in same step
-            Debug.Log($"{agentName} correctly spotted an enemy agent, rewarded +5");
+            reward += 0.05f; // One-time bonus for acquiring target
+            rewardReason += "Enemy acquired (+0.05) ";
+            Debug.Log($"{agentName} REWARD EVENT: Enemy acquired +0.05");
         }
         
-        // Shooting rewards/penalties
+        // 2. Facing bonus - ONE-TIME reward when first facing toward enemy (only once per spotting session)
+        if (agentCurrentlySpottingEnemy[agentIndex] && agentFacingTowardEnemy[agentIndex] && !agentAlreadyGotFacingBonus[agentIndex])
+        {
+            reward += 0.25f; // One-time bonus for proper orientation
+            rewardReason += "Facing enemy (+0.25) ";
+            agentAlreadyGotFacingBonus[agentIndex] = true; // Mark as received
+            Debug.Log($"{agentName} REWARD EVENT: Facing enemy +0.25");
+        }
+        
+        // 3. Spotted by enemy penalty - punishment for being seen
+        if (agentSpottedByEnemy[agentIndex])
+        {
+            reward -= 0.1f; // Penalty for being spotted (encourages stealth)
+            rewardReason += "Spotted by enemy (-0.1) ";
+            Debug.Log($"{agentName} PENALTY: Spotted by enemy -0.1");
+        }
+        
+        // Proximity rewards removed to prevent continuous accumulation
+        // Agents should be rewarded for discrete events, not continuous states
+        
+        // Shooting rewards/penalties (normalized)
         if (agentShotEnemy[agentIndex])
         {
-            reward += 200f;  // MAJOR REWARD - doubled from 100 to 200!
-            rewardReason += "🏆 KILLED ENEMY (+200) ";
-            // Don't end episode immediately in multi-agent - let others continue
-            Debug.Log($"{agentName} 🏆 MASSIVE KILL REWARD! +200 points for elimination!");
+            reward += 1.0f;  // Maximum positive reward for kills
+            rewardReason += "🏆 KILLED ENEMY (+1.0) ";
+            Debug.Log($"{agentName} 🏆 MAXIMUM KILL REWARD! +1.0 for elimination!");
         }
         else if (agentShotNothing[agentIndex])
         {
-            reward -= 5f;  // Reduced penalty to encourage more shooting attempts
-            rewardReason += "Shot nothing (-5) ";
+            reward -= 0.005f;  // Small penalty for missing shots
+            rewardReason += "Shot nothing (-0.05) ";
         }
 
-        // Wall collision penalty
+        // Wall collision penalty (normalized)
         if (agentHitWall[agentIndex])
         {
-            reward -= 20f;
-            rewardReason += "Hit wall (-20) ";
+            reward -= 0.2f; // Normalized from -20
+            rewardReason += "Hit wall (-0.2) ";
+            Debug.Log($"{agentName} hit wall, penalty: -0.2");
+        }
+        
+        // Punishment for being hit/killed by another agent
+        if (agentHitByEnemy[agentIndex])
+        {
+            reward -= 0.8f; // Significant penalty for being eliminated
+            rewardReason += "Hit by enemy (-0.8) ";
+            Debug.Log($"{agentName} was hit by enemy, major penalty: -0.8");
         }
 
-        // Small penalty for doing nothing (encourages action)
-        if (lastAction == null || (lastAction.shoot < 0.5f && 
-            Mathf.Abs(lastAction.moveForward) < 0.1f && 
-            Mathf.Abs(lastAction.moveLeft) < 0.1f && 
-            Mathf.Abs(lastAction.moveRight) < 0.1f))
+        // Penalty for doing nothing or being inactive
+        bool isDoingNothing = (lastAction == null || 
+            (lastAction.shoot < 0.1f && 
+             Mathf.Abs(lastAction.moveForward) < 0.1f && 
+             Mathf.Abs(lastAction.moveLeft) < 0.1f && 
+             Mathf.Abs(lastAction.moveRight) < 0.1f && 
+             Mathf.Abs(lastAction.lookAngle) < 0.1f));
+             
+        if (isDoingNothing)
         {
-            reward -= 5f;
-            rewardReason += "Do nothing (-5) ";
+            reward -= 0.05f; // Consistent penalty for inactivity
+            rewardReason += "Inactivity (-0.05) ";
         }
+    
+        // No survival bonus to prevent continuous reward accumulation
+        // Agents should be rewarded for actions, not for simply staying alive
         
-        // Survival bonus (small reward for staying alive while others die)
-        int aliveCount = 0;
-        for (int i = 0; i < agentIsAlive.Length; i++)
-        {
-            if (agentIsAlive[i]) aliveCount++;
-        }
-        
-        if (aliveCount <= agents.Length / 2 && agentIsAlive[agentIndex])
-        {
-            reward += 2f; // Small survival bonus
-            rewardReason += "Survival (+2) ";
-        }
+        // Clamp final reward to [-1, +1] range for stability
+        reward = Mathf.Clamp(reward, -1f, 1f);
         
         // Update cumulative rewards tracking
         agentLastStepRewards[agentIndex] = reward;
         agentCumulativeRewards[agentIndex] += reward;
         
-        // Log reward calculation for debugging
+        // COMPREHENSIVE REWARD VALIDATION AND LOGGING
         if (reward != 0f)
         {
-            Debug.Log($"{agentName} Reward calculated: {reward:F1} - {rewardReason} (Total: {agentCumulativeRewards[agentIndex]:F1})");
+            Debug.Log($"{agentName} Step Reward: {reward:F3} - {rewardReason} | Total: {agentCumulativeRewards[agentIndex]:F2}");
             
-            // Extra validation: If reward includes enemy spotting, verify it's legitimate
-            if (rewardReason.Contains("Spotted enemy"))
+            // STRICT validation - catch ANY unexpected positive rewards
+            if (reward > 0f)
             {
-                Debug.Log($"{agentName} - VERIFICATION: Enemy spotting reward given. Ensure this was for spotting an actual agent, not a wall!");
+                bool isValidPositiveReward = rewardReason.Contains("Enemy acquired") || 
+                                           rewardReason.Contains("Facing enemy") || 
+                                           rewardReason.Contains("KILLED ENEMY");
+                                           
+                if (!isValidPositiveReward)
+                {
+                    Debug.LogError($"{agentName} - INVALID POSITIVE REWARD DETECTED: {reward:F3} - {rewardReason}");
+                    Debug.LogError($"This reward should not exist! Check the reward calculation logic.");
+                }
+            }
+            
+            // Log specific reward breakdown for debugging
+            if (reward > 0.4f) // High rewards that might be combinations
+            {
+                Debug.LogWarning($"{agentName} - HIGH REWARD DETECTED: {reward:F3} - Please verify this is correct: {rewardReason}");
             }
         }
 
@@ -181,7 +244,7 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             return true;
         }
         
-        // Check if only one agent remains alive
+        // Check if only one agent remains alive (or none)
         int aliveCount = 0;
         for (int i = 0; i < agentIsAlive.Length; i++)
         {
@@ -190,7 +253,7 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         
         if (aliveCount <= 1)
         {
-            Debug.Log($"Episode finished - Only {aliveCount} agent(s) remaining");
+            Debug.Log($"Episode finished - Only {aliveCount} agent(s) remaining (Last agent wins or all dead)");
             return true;
         }
         
@@ -202,6 +265,18 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         }
         
         return false;
+    }
+
+    // Method for GeneticAlgorithmManager compatibility
+    public bool GetEpisodeEnded()
+    {
+        return IsEpisodeFinished();
+    }
+
+    // Method for GeneticAlgorithmManager compatibility
+    public void ResetEnvironment()
+    {
+        Reset();
     }
 
     public void Reset()
@@ -220,10 +295,22 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             agentShotNothing[i] = false;
             agentSpottedEnemy[i] = false;
             agentAlreadySpottedThisStep[i] = false;
+            agentHitByEnemy[i] = false;
+            agentDistanceToNearestEnemy[i] = 0f;
+            agentPreviousDistanceToEnemy[i] = 0f;
             agentKills[i] = 0;
             agentIsAlive[i] = true; // All agents start alive
             agentCumulativeRewards[i] = 0f; // Reset cumulative rewards
             agentLastStepRewards[i] = 0f; // Reset last step rewards
+            agentHadMeaningfulMovement[i] = false; // Reset movement tracking
+            
+            // Reset enhanced spotting tracking
+            agentCurrentlySpottingEnemy[i] = false;
+            agentWasSpottingEnemyLastFrame[i] = false;
+            agentJustEnteredSpotting[i] = false;
+            agentFacingTowardEnemy[i] = false;
+            agentAlreadyGotFacingBonus[i] = false;
+            agentSpottedByEnemy[i] = false;
             
             // Revive agent (make visible and enable collider)
             ReviveAgent(i);
@@ -235,17 +322,218 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         hasBeenPunishedForTimeout = false;
         lastTimeoutPunishmentTime = 0f;
 
-        // Reset agent positions
-        if (spawnPoints != null && spawnPoints.Length > 0)
+        // Reset agent positions using dynamic spawning system
+        if (useDynamicSpawning)
         {
-            // Shuffle spawn points to ensure fair spawning
-            System.Collections.Generic.List<int> availableSpawns = new System.Collections.Generic.List<int>();
-            for (int i = 0; i < spawnPoints.Length; i++)
+            SpawnAgentsRandomly();
+        }
+        else if (spawnPoints != null && spawnPoints.Length > 0)
+        {
+            SpawnAgentsAtSpawnPoints();
+        }
+        else
+        {
+            Debug.LogWarning("No spawn system configured! Agents will spawn at their current positions.");
+            GenerateSpawnPoints(agents.Length);
+            SpawnAgentsRandomly();
+        }
+
+        UpdateState();
+    }
+    
+    // Dynamic spawn point generation
+    private void GenerateSpawnPoints(int agentCount)
+    {
+        Debug.Log($"🎯 Generating {agentCount} spawn points in range X:[{spawnRangeX.x}, {spawnRangeX.y}] Y:[{spawnRangeY.x}, {spawnRangeY.y}]");
+        
+        List<Vector3> spawnPositions = new List<Vector3>();
+        int maxAttempts = agentCount * 20; // Prevent infinite loops
+        int attempts = 0;
+        
+        // Generate spawn positions with minimum distance enforcement and obstacle avoidance
+        while (spawnPositions.Count < agentCount && attempts < maxAttempts)
+        {
+            attempts++;
+            
+            Vector3 candidatePosition = new Vector3(
+                Random.Range(spawnRangeX.x, spawnRangeX.y),
+                Random.Range(spawnRangeY.x, spawnRangeY.y),
+                0f
+            );
+            
+            // Check for obstacles at spawn position
+            bool hasObstacle = Physics2D.OverlapCircle(candidatePosition, 1f, wallLayerMask);
+            if (hasObstacle)
             {
-                availableSpawns.Add(i);
+                continue; // Skip this position if there's an obstacle
             }
             
-            for (int i = 0; i < agents.Length && i < spawnPoints.Length; i++)
+            // Check minimum distance from existing spawn points
+            bool validPosition = true;
+            foreach (Vector3 existingPos in spawnPositions)
+            {
+                if (Vector3.Distance(candidatePosition, existingPos) < minSpawnDistance)
+                {
+                    validPosition = false;
+                    break;
+                }
+            }
+            
+            if (validPosition)
+            {
+                spawnPositions.Add(candidatePosition);
+                Debug.Log($"✅ Valid spawn point {spawnPositions.Count} at {candidatePosition} (attempt {attempts})");
+            }
+        }
+        
+        // If we couldn't generate enough positions, try fallback positions with obstacle checking
+        while (spawnPositions.Count < agentCount)
+        {
+            Vector3 fallbackPosition = new Vector3(
+                Random.Range(spawnRangeX.x, spawnRangeX.y),
+                Random.Range(spawnRangeY.x, spawnRangeY.y),
+                0f
+            );
+            
+            // Even for fallback, try to avoid obstacles
+            bool hasObstacle = Physics2D.OverlapCircle(fallbackPosition, 1f, wallLayerMask);
+            if (!hasObstacle)
+            {
+                spawnPositions.Add(fallbackPosition);
+                Debug.Log($"🆘 Fallback spawn point {spawnPositions.Count} at {fallbackPosition}");
+            }
+            else
+            {
+                // If we really can't find any valid positions, use it anyway but warn
+                if (spawnPositions.Count < agentCount && attempts > maxAttempts * 2)
+                {
+                    spawnPositions.Add(fallbackPosition);
+                    Debug.LogWarning($"⚠️ Forced spawn point {spawnPositions.Count} at {fallbackPosition} (obstacle detected!)");
+                }
+            }
+            attempts++;
+            
+            // Prevent infinite loop in extreme cases
+            if (attempts > maxAttempts * 3)
+            {
+                Debug.LogError("❌ Could not generate enough spawn points without obstacles. Map may be too crowded.");
+                break;
+            }
+        }
+        
+        // Create spawn point GameObjects
+        CreateSpawnPointObjects(spawnPositions);
+        
+        Debug.Log($"✅ Generated {spawnPositions.Count} spawn points (attempts: {attempts})");
+    }
+    
+    private void CreateSpawnPointObjects(List<Vector3> positions)
+    {
+        // Clean up existing spawn points if they were auto-generated
+        if (spawnPoints != null)
+        {
+            foreach (Transform spawnPoint in spawnPoints)
+            {
+                if (spawnPoint != null && spawnPoint.name.StartsWith("AutoSpawn_"))
+                {
+                    DestroyImmediate(spawnPoint.gameObject);
+                }
+            }
+        }
+        
+        // Create new spawn point array
+        spawnPoints = new Transform[positions.Count];
+        
+        for (int i = 0; i < positions.Count; i++)
+        {
+            GameObject spawnObject = new GameObject($"AutoSpawn_{i}");
+            spawnObject.transform.position = positions[i];
+            spawnObject.transform.rotation = Quaternion.Euler(0, 0, Random.Range(0f, 360f));
+            spawnObject.transform.SetParent(this.transform);
+            
+            // Add visual indicator in editor
+            if (visualizeSpawnRange)
+            {
+                spawnObject.AddComponent<SphereCollider>().isTrigger = true;
+                spawnObject.GetComponent<SphereCollider>().radius = 0.5f;
+            }
+            
+            spawnPoints[i] = spawnObject.transform;
+        }
+    }
+    
+    private void SpawnAgentsRandomly()
+    {
+        Debug.Log("🎲 Spawning agents at randomized positions with obstacle avoidance");
+        
+        for (int i = 0; i < agents.Length; i++)
+        {
+            Vector3 randomPosition = new Vector3(
+                Random.Range(spawnRangeX.x, spawnRangeX.y),
+                Random.Range(spawnRangeY.x, spawnRangeY.y),
+                agents[i].position.z // Preserve Z coordinate
+            );
+            
+            // Ensure minimum distance from other agents and avoid obstacles
+            int attempts = 0;
+            while (attempts < 20) // Increased max attempts for obstacle avoidance
+            {
+                bool tooClose = false;
+                bool hasObstacle = false;
+                
+                // Check for obstacles
+                hasObstacle = Physics2D.OverlapCircle(randomPosition, 1f, wallLayerMask);
+                
+                // Check distance from other agents
+                for (int j = 0; j < i; j++)
+                {
+                    if (Vector3.Distance(randomPosition, agents[j].position) < minSpawnDistance)
+                    {
+                        tooClose = true;
+                        break;
+                    }
+                }
+                
+                if (!tooClose && !hasObstacle) break;
+                
+                randomPosition = new Vector3(
+                    Random.Range(spawnRangeX.x, spawnRangeX.y),
+                    Random.Range(spawnRangeY.x, spawnRangeY.y),
+                    agents[i].position.z
+                );
+                attempts++;
+            }
+            
+            agents[i].position = randomPosition;
+            agents[i].rotation = Quaternion.Euler(0, 0, Random.Range(0f, 360f));
+            
+            // Log result
+            bool finalObstacleCheck = Physics2D.OverlapCircle(randomPosition, 1f, wallLayerMask);
+            if (finalObstacleCheck)
+            {
+                Debug.LogWarning($"⚠️ Agent_{i} spawned at {randomPosition} with obstacle detected (attempts: {attempts})");
+            }
+            else
+            {
+                Debug.Log($"✅ Agent_{i} spawned at {randomPosition} with rotation {agents[i].rotation.eulerAngles.z:F0}° (attempts: {attempts})");
+            }
+        }
+    }
+    
+    private void SpawnAgentsAtSpawnPoints()
+    {
+        Debug.Log("📍 Spawning agents at predefined spawn points");
+        
+        // Shuffle spawn points to ensure fair spawning
+        System.Collections.Generic.List<int> availableSpawns = new System.Collections.Generic.List<int>();
+        for (int i = 0; i < spawnPoints.Length; i++)
+        {
+            availableSpawns.Add(i);
+        }
+        
+        for (int i = 0; i < agents.Length; i++)
+        {
+            if (availableSpawns.Count > 0)
             {
                 int randomIndex = Random.Range(0, availableSpawns.Count);
                 int spawnIndex = availableSpawns[randomIndex];
@@ -253,20 +541,87 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
                 
                 agents[i].position = spawnPoints[spawnIndex].position;
                 agents[i].rotation = spawnPoints[spawnIndex].rotation;
+                
+                Debug.Log($"Agent_{i} spawned at spawn point {spawnIndex}: {agents[i].position}");
+            }
+            else
+            {
+                // Fallback to random position if not enough spawn points
+                Debug.LogWarning($"Not enough spawn points for Agent_{i}, using random position");
+                Vector3 randomPos = new Vector3(
+                    Random.Range(spawnRangeX.x, spawnRangeX.y),
+                    Random.Range(spawnRangeY.x, spawnRangeY.y),
+                    agents[i].position.z
+                );
+                agents[i].position = randomPos;
+                agents[i].rotation = Quaternion.Euler(0, 0, Random.Range(0f, 360f));
             }
         }
-        else
-        {
-            Debug.LogWarning("No spawn points assigned! Agents will spawn at their current positions.");
-        }
-
-        UpdateState();
     }
 
     public void Step()
     {
         currentEpisodeTime += Time.fixedDeltaTime;
         timeSinceLastReward += Time.fixedDeltaTime;
+        
+        // Update distance tracking before resetting flags
+        for (int i = 0; i < agents.Length; i++)
+        {
+            if (agentIsAlive[i])
+            {
+                // Store previous distance for proximity calculation
+                agentPreviousDistanceToEnemy[i] = agentDistanceToNearestEnemy[i];
+                
+                // Find nearest enemy distance (only update if we can see enemies)
+                float nearestDistance = float.MaxValue;
+                bool foundNearbyEnemy = false;
+                
+                for (int j = 0; j < agents.Length; j++)
+                {
+                    if (j != i && agentIsAlive[j])
+                    {
+                        float distance = Vector3.Distance(agents[i].position, agents[j].position);
+                        if (distance < SPOTTING_RANGE && distance < nearestDistance) // Only track if within spotting range
+                        {
+                            nearestDistance = distance;
+                            foundNearbyEnemy = true;
+                        }
+                    }
+                }
+                
+                // Only update distance if we found a nearby enemy
+                if (foundNearbyEnemy)
+                {
+                    agentDistanceToNearestEnemy[i] = nearestDistance;
+                }
+                else
+                {
+                    // Reset distance tracking if no enemies in range
+                    agentDistanceToNearestEnemy[i] = 0f;
+                    agentPreviousDistanceToEnemy[i] = 0f;
+                }
+            }
+        }
+        
+        // Update spotting state tracking before resetting flags
+        for (int i = 0; i < agents.Length; i++)
+        {
+            // Store previous frame spotting state
+            agentWasSpottingEnemyLastFrame[i] = agentCurrentlySpottingEnemy[i];
+            
+            // Reset facing bonus flag if agent stops spotting enemy
+            if (!agentCurrentlySpottingEnemy[i] && agentWasSpottingEnemyLastFrame[i])
+            {
+                agentAlreadyGotFacingBonus[i] = false; // Reset for next spotting session
+                Debug.Log($"Agent_{i} stopped spotting - reset facing bonus flag");
+            }
+            
+            // Reset current frame flags
+            agentCurrentlySpottingEnemy[i] = false;
+            agentJustEnteredSpotting[i] = false;
+            agentFacingTowardEnemy[i] = false;
+            agentSpottedByEnemy[i] = false; // Reset spotted flag each frame
+        }
         
         // Reset flags for all agents
         for (int i = 0; i < agents.Length; i++)
@@ -276,6 +631,8 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             agentShotNothing[i] = false;
             agentSpottedEnemy[i] = false;
             agentAlreadySpottedThisStep[i] = false;
+            agentHitByEnemy[i] = false;
+            agentHadMeaningfulMovement[i] = false; // Reset movement tracking
         }
 
         // Apply actions would be called by the training system
@@ -291,16 +648,11 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             
             // Check if any agent earned meaningful POSITIVE reward to reset timeout
             // ONLY positive rewards count as meaningful - penalties should NOT reset timeout
-            bool isTimeoutPunishment = (agentReward == timeoutPunishment || agentReward == timeoutPunishment * 0.5f);
+            bool isTimeoutPunishment = (Mathf.Abs(agentReward - (-0.3f)) < 0.01f || Mathf.Abs(agentReward - (-0.15f)) < 0.01f);
             
-            if (agentReward > 1f && !isTimeoutPunishment)
+            if (agentReward > 0.02f && !isTimeoutPunishment) // Meaningful positive reward threshold
             {
                 anyMeaningfulReward = true;
-                Debug.Log($"Agent_{i} earned meaningful POSITIVE reward: {agentReward:F1} - timeout timer will reset");
-            }
-            else if (agentReward < -1f && !isTimeoutPunishment)
-            {
-                Debug.Log($"Agent_{i} received penalty: {agentReward:F1} - timeout timer will NOT reset");
             }
         }
         
@@ -310,18 +662,10 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             timeSinceLastReward = 0f; // Reset timeout timer
             hasEarnedRewardThisEpisode = true;
             hasBeenPunishedForTimeout = false; // Reset punishment flag
-            Debug.Log($"Meaningful POSITIVE reward earned by agents, timeout timer reset to 0");
         }
         
         // Update lastReward for legacy compatibility (use average or first agent)
         lastReward = agents.Length > 0 ? agentCumulativeRewards[0] : 0f;
-        
-        // Log timeout status periodically
-        if (enableTimeout && timeSinceLastReward > 2f && (int)(timeSinceLastReward * 2) % 2 == 0) // Every 0.5 seconds after 2 seconds
-        {
-            string status = hasBeenPunishedForTimeout ? " (PUNISHED)" : "";
-            Debug.Log($"Time since last reward: {timeSinceLastReward:F1}s / {noRewardTimeoutDuration}s{status}");
-        }
     }
 
     public void ApplyAction(Action action, int agentIndex)
@@ -342,8 +686,9 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         Transform agent = agents[agentIndex];
         lastAction = action;
         
-        string agentName = $"Agent_{agentIndex}";
-        Debug.Log($"{agentName} Action - Look: {action.lookAngle:F2}, Shoot: {action.shoot}, Forward: {action.moveForward:F2}, Left: {action.moveLeft:F2}, Right: {action.moveRight:F2}");
+        // Only log important actions or errors
+        bool hasSignificantAction = Mathf.Abs(action.lookAngle) > 0.3f || action.shoot > 0.5f || 
+                                   Mathf.Abs(action.moveForward) > 0.3f || Mathf.Abs(action.moveLeft) > 0.3f || Mathf.Abs(action.moveRight) > 0.3f;
 
         // Apply rotation
         if (Mathf.Abs(action.lookAngle) > 0.1f)
@@ -354,31 +699,22 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 
         // Apply movement with better physics integration
         Vector3 movement = Vector3.zero;
-        bool hasMovement = false;
         
         if (Mathf.Abs(action.moveForward) > 0.01f)
         {
             movement += agent.up * action.moveForward * moveSpeed * Time.fixedDeltaTime;
-            hasMovement = true;
-            Debug.Log($"Forward movement: {action.moveForward:F2} -> {movement.magnitude:F3}");
         }
         if (Mathf.Abs(action.moveLeft) > 0.01f)
         {
             movement -= agent.right * action.moveLeft * moveSpeed * Time.fixedDeltaTime;
-            hasMovement = true;
-            Debug.Log($"Left movement: {action.moveLeft:F2}");
         }
         if (Mathf.Abs(action.moveRight) > 0.01f)
         {
             movement += agent.right * action.moveRight * moveSpeed * Time.fixedDeltaTime;
-            hasMovement = true;
-            Debug.Log($"Right movement: {action.moveRight:F2}");
         }
         
-        if (!hasMovement)
-        {
-            Debug.Log($"Agent_{agentIndex} - No movement (all movement values too small)");
-        }
+        // Check if movement is meaningful (threshold for actual position change)
+        bool hasMeaningfulMovement = movement.magnitude > 0.05f; // Minimum movement threshold
 
         // Apply actual movement with physics support
         if (movement != Vector3.zero)
@@ -387,43 +723,36 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             RaycastHit2D hit = Physics2D.Raycast(agent.position, movement.normalized, movement.magnitude + 0.5f, wallLayerMask);
             if (hit.collider != null)
             {
-                Debug.Log($"Wall collision detected for Agent_{agentIndex} - blocked by {hit.collider.name}");
                 agentHitWall[agentIndex] = true;
+                // No meaningful movement if blocked by wall
+                agentHadMeaningfulMovement[agentIndex] = false;
             }
             else
             {
-                Vector3 oldPos = agent.position;
-                
                 // Try to use Rigidbody2D if available, otherwise move directly
                 Rigidbody2D rb = agent.GetComponent<Rigidbody2D>();
                 if (rb != null)
                 {
-                    // Use physics-based movement
                     rb.MovePosition(agent.position + movement);
-                    Debug.Log($"Agent_{agentIndex} moved with Rigidbody from {oldPos} to {agent.position} (delta: {movement})");
                 }
                 else
                 {
-                    // Direct position change
                     agent.position += movement;
-                    Debug.Log($"Agent_{agentIndex} moved directly from {oldPos} to {agent.position} (delta: {movement})");
                 }
+                // Mark as meaningful movement if actually moved
+                agentHadMeaningfulMovement[agentIndex] = hasMeaningfulMovement;
             }
         }
         else
         {
-            Debug.Log($"Agent_{agentIndex} - No movement (movement vector is zero)");
+            // No movement attempted
+            agentHadMeaningfulMovement[agentIndex] = false;
         }
 
         // Handle shooting
         if (action.shoot > 0.1f)  // Lower threshold for better shooting detection
         {
-            Debug.Log($"🔫 Agent_{agentIndex} ATTEMPTING TO SHOOT! (shoot value: {action.shoot:F2})");
             PerformShoot(agent, agentIndex);
-        }
-        else
-        {
-            Debug.Log($"Agent_{agentIndex} not shooting (shoot value: {action.shoot:F2} <= 0.1)");
         }
     }
 
@@ -432,11 +761,8 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         // Dead agents cannot shoot
         if (!agentIsAlive[shooterIndex])
         {
-            Debug.Log($"💀 Dead Agent_{shooterIndex} attempted to shoot - ignoring");
             return;
         }
-        
-        Debug.Log($"🔫 Agent_{shooterIndex} FIRES WEAPON! Position: {shooter.position}, Direction: {shooter.up}");
         
         // Apply 0.4 unit offset in forward direction for shooting (like ray offset)
         Vector3 shootOrigin = shooter.position + (shooter.up * 0.4f);
@@ -445,7 +771,7 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         RaycastHit2D hit = Physics2D.Raycast(shootOrigin, shooter.up, shootRange, wallLayerMask | agentLayerMask);
         
         // Enhanced visual feedback with proper color coding
-        Color shootRayColor = Color.cyan; // Cyan for shooting rays to distinguish from detection rays
+        Color shootRayColor = Color.cyan; // Cyan for shooting rays
         if (hit.collider != null)
         {
             // Check if we hit an agent
@@ -458,11 +784,9 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
                     break;
                 }
             }
-            shootRayColor = hitAgent ? Color.magenta : Color.cyan; // Magenta for enemy hits, cyan for wall hits
+            shootRayColor = hitAgent ? Color.magenta : Color.cyan;
         }
         Debug.DrawRay(shootOrigin, shooter.up * shootRange, shootRayColor, 1f);
-        
-        Debug.Log($"🎯 Agent_{shooterIndex} shoots from offset position! Hit: {(hit.collider != null ? hit.collider.name : "nothing")} at distance {(hit.collider != null ? hit.distance.ToString("F2") : "N/A")}");
 
         if (hit.collider != null)
         {
@@ -473,6 +797,7 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
                 if (i != shooterIndex && hit.collider.transform == agents[i] && agentIsAlive[i])
                 {
                     agentShotEnemy[shooterIndex] = true;
+                    agentHitByEnemy[i] = true; // Track that this agent was hit
                     agentIsAlive[i] = false; // Target agent dies
                     agentKills[shooterIndex]++;
                     hitEnemy = true;
@@ -604,79 +929,62 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
                             {
                                 // Hit self
                                 hitSelf = true;
-                                Debug.Log($"🟢 Ray {i} from Agent_{castingAgentIndex} hit SELF at distance {hits[i].distance:F2}");
                             }
                             else
                             {
-                                // Hit enemy agent within SPOTTING_RANGE (same as RAY_DISTANCE)
+                                // Hit enemy agent within SPOTTING_RANGE
                                 hitEnemyAgent = true;
-                                Debug.Log($"🎯 Ray {i} from Agent_{castingAgentIndex} hit ENEMY Agent_{targetIndex} at distance {hits[i].distance:F2} (max range: {SPOTTING_RANGE})");
                                 
+                                // Mark that agent is currently spotting an enemy
+                                agentCurrentlySpottingEnemy[castingAgentIndex] = true;
+                                
+                                // Mark the spotted agent as being seen by enemy
+                                agentSpottedByEnemy[targetIndex] = true;
+                                
+                                // Check if this is first time spotting (raycast enter)
+                                if (!agentWasSpottingEnemyLastFrame[castingAgentIndex])
+                                {
+                                    agentJustEnteredSpotting[castingAgentIndex] = true;
+                                    Debug.Log($"Agent_{castingAgentIndex} ENTERED spotting range of Agent_{targetIndex}");
+                                }
+                                
+                                // Check if agent is facing toward the enemy
+                                Vector3 directionToEnemy = (agents[targetIndex].position - agents[castingAgentIndex].position).normalized;
+                                Vector3 agentForward = agents[castingAgentIndex].up; // Unity 2D uses 'up' as forward
+                                float dotProduct = Vector3.Dot(agentForward, directionToEnemy);
+                                
+                                // Consider "facing toward" if dot product > 0.5 (roughly 60 degree cone)
+                                if (dotProduct > 0.5f)
+                                {
+                                    agentFacingTowardEnemy[castingAgentIndex] = true;
+                                }
+                                
+                                // Legacy spotting flag for backward compatibility
                                 if (!agentAlreadySpottedThisStep[castingAgentIndex])
                                 {
                                     agentSpottedEnemy[castingAgentIndex] = true;
-                                    Debug.Log($"✅ Agent_{castingAgentIndex} gets SPOTTING REWARD for detecting Agent_{targetIndex} within range {SPOTTING_RANGE}");
                                 }
                             }
                             break;
                         }
                     }
                     
-                    // If didn't hit any agent, check if it's a wall
+                    // If didn't hit any agent, it's a wall or other object
                     if (!hitEnemyAgent && !hitSelf)
                     {
-                        bool hitWall = ((1 << hits[i].collider.gameObject.layer) & wallLayerMask) != 0;
-                        if (hitWall)
-                        {
-                            Debug.Log($"🟢 Ray {i} from Agent_{castingAgentIndex} hit WALL at distance {hits[i].distance:F2} - NO REWARD");
-                        }
-                        else
-                        {
-                            Debug.Log($"🟢 Ray {i} from Agent_{castingAgentIndex} hit UNKNOWN: {hits[i].collider.name} (layer: {hits[i].collider.gameObject.layer})");
-                        }
+                        // Wall hit - no logging needed
                     }
                 }
             }
             
-            // Visual debug
+            // Visual debug with color coding
             if (hits[i].collider != null)
             {
-                
-                // Color coding based on what was hit
-                Color rayColor;
-                if (hitEnemyAgent)
-                {
-                    rayColor = Color.blue;  // Blue: Hit enemy agent (SPOTTED!)
-                    Debug.Log($"🔵 Ray {i} from Agent_{castingAgentIndex} detected ENEMY agent at distance {hits[i].distance:F2}");
-                }
-                else
-                {
-                    rayColor = Color.green; //  Green: Hit wall/obstacle or own agent
-                    
-                    if (hitSelf)
-                    {
-                        Debug.Log($"🟢 Ray {i} from Agent_{castingAgentIndex} hit SELF (green ray - no reward)");
-                    }
-                    else
-                    {
-                        // Check what we actually hit for debugging
-                        bool hitWall = ((1 << hits[i].collider.gameObject.layer) & wallLayerMask) != 0;
-                        if (hitWall)
-                        {
-                            Debug.Log($"🟢 Ray {i} from Agent_{castingAgentIndex} hit WALL (green ray - no reward)");
-                        }
-                        else
-                        {
-                            Debug.Log($"🟢 Ray {i} from Agent_{castingAgentIndex} hit UNKNOWN: {hits[i].collider.name} (green ray)");
-                        }
-                    }
-                }
-                
+                Color rayColor = hitEnemyAgent ? Color.blue : Color.green;
                 Debug.DrawLine(rayOrigin, hits[i].point, rayColor, 0.2f);
             }
             else
             {
-                //  Red: No collision (clear path)
                 Debug.DrawRay(rayOrigin, direction * RAY_DISTANCE, Color.red, 0.2f);
             }
         }
@@ -761,12 +1069,30 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         agentShotNothing = new bool[agentCount];
         agentSpottedEnemy = new bool[agentCount];
         agentAlreadySpottedThisStep = new bool[agentCount];
+        agentHitByEnemy = new bool[agentCount];
+        agentDistanceToNearestEnemy = new float[agentCount];
+        agentPreviousDistanceToEnemy = new float[agentCount];
         agentKills = new int[agentCount];
         agentIsAlive = new bool[agentCount];
         agentCumulativeRewards = new float[agentCount];
         agentLastStepRewards = new float[agentCount];
+        agentHadMeaningfulMovement = new bool[agentCount];
         
-        Debug.Log($"Environment initialized with {agentCount} agents");
+        // Initialize enhanced spotting tracking arrays
+        agentCurrentlySpottingEnemy = new bool[agentCount];
+        agentWasSpottingEnemyLastFrame = new bool[agentCount];
+        agentJustEnteredSpotting = new bool[agentCount];
+        agentFacingTowardEnemy = new bool[agentCount];
+        agentAlreadyGotFacingBonus = new bool[agentCount];
+        agentSpottedByEnemy = new bool[agentCount];
+        
+        // Generate spawn points if needed
+        if (generateSpawnPointsOnStart || useDynamicSpawning)
+        {
+            GenerateSpawnPoints(agentCount);
+        }
+        
+        Debug.Log($"Environment initialized with {agentCount} agents and {(spawnPoints?.Length ?? 0)} spawn points");
         Reset();
     }
 
@@ -895,210 +1221,71 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             return agentKills[agentIndex];
         return 0;
     }
-    
-    // Method to get death statistics
-    public void LogDeathStatistics()
+
+    // Debug method to test spawn system
+    [ContextMenu("Regenerate Spawn Points")]
+    public void RegenerateSpawnPoints()
     {
-        int aliveCount = GetAliveAgentCount();
-        int deadCount = agents.Length - aliveCount;
-        
-        Debug.Log($"🏆 DEATH STATISTICS: {aliveCount} alive, {deadCount} dead");
-        
-        for (int i = 0; i < agents.Length; i++)
+        if (agents == null || agents.Length == 0)
         {
-            string status = agentIsAlive[i] ? "🟢 ALIVE" : "💀 DEAD";
-            Debug.Log($"Agent_{i}: {status}, Kills: {agentKills[i]}");
-        }
-    }
-    
-    // Debug method to test death system
-    [ContextMenu("Test Agent Death")]
-    public void TestAgentDeath()
-    {
-        if (agents.Length > 1)
-        {
-            Debug.Log("🧪 TESTING AGENT DEATH SYSTEM");
-            LogDeathStatistics();
-            
-            // Kill the first alive agent we find (except the first one)
-            for (int i = 1; i < agents.Length; i++)
-            {
-                if (agentIsAlive[i])
-                {
-                    Debug.Log($"💀 Test killing Agent_{i}");
-                    agentIsAlive[i] = false;
-                    MakeAgentDead(i);
-                    break;
-                }
-            }
-            
-            LogDeathStatistics();
-        }
-    }
-    
-    // Debug method to test shooting
-    [ContextMenu("Test Agent Shooting")]
-    public void TestAgentShooting()
-    {
-        Debug.Log("🔫 TESTING AGENT SHOOTING SYSTEM");
-        
-        // Find first alive agent to test shooting
-        for (int i = 0; i < agents.Length; i++)
-        {
-            if (agentIsAlive[i])
-            {
-                Debug.Log($"🎯 Testing Agent_{i} shooting capability");
-                PerformShoot(agents[i], i);
-                break;
-            }
-        }
-        
-        // Log current reward structure
-        Debug.Log("💰 UPDATED REWARD STRUCTURE:");
-        Debug.Log("   🏆 Kill Enemy: +200 points (DOUBLED!)");
-        Debug.Log("   👁️ Spot Enemy: +5 points");
-        Debug.Log("   🚫 Miss Shot: -5 points (reduced penalty)");
-        Debug.Log("   🧱 Hit Wall: -20 points");
-        Debug.Log("   ⏰ Timeout: -30 points");
-        Debug.Log("   📊 Random shooting: 80% chance");
-        Debug.Log("   🎯 Neural threshold: 0.1 (very easy)");
-        Debug.Log("   🔧 Shooting threshold: 0.1 (very sensitive)");
-    }
-    
-    // Debug method to force all agents to shoot
-    [ContextMenu("Force All Agents Shoot")]
-    public void ForceAllAgentsShoot()
-    {
-        Debug.Log("🔫🔫🔫 FORCING ALL AGENTS TO SHOOT NOW!");
-        
-        int shootCount = 0;
-        for (int i = 0; i < agents.Length; i++)
-        {
-            if (agentIsAlive[i])
-            {
-                Debug.Log($"💥 Forcing Agent_{i} to shoot");
-                PerformShoot(agents[i], i);
-                shootCount++;
-            }
-        }
-        
-        Debug.Log($"🎯 Total shots fired: {shootCount}");
-        LogDeathStatistics();
-    }
-    
-    // Debug method to test ray visualization
-    [ContextMenu("Test Ray Visualization")]
-    public void TestRayVisualization()
-    {
-        Debug.Log("🌈 TESTING RAY VISUALIZATION SYSTEM");
-        
-        // Force raycast updates for all alive agents
-        for (int i = 0; i < agents.Length; i++)
-        {
-            if (agentIsAlive[i])
-            {
-                Debug.Log($"🔍 Testing rays for Agent_{i}");
-                PerformRaycasts(agents[i].position, agents[i].up, i);
-            }
-        }
-        
-        Debug.Log("🎨 RAY COLOR SYSTEM:");
-        Debug.Log("   🔴 Red: No collision (clear path)");
-        Debug.Log("   🟢 Green: Hit wall/obstacle");
-        Debug.Log("   🔵 Blue: Hit enemy agent (SPOTTED!)");
-        Debug.Log("   🔵 Cyan: Shooting ray (weapon fire)");
-        Debug.Log("   🟣 Magenta: Shooting ray hit enemy");
-        Debug.Log("📡 Check Scene view to see colored rays!");
-    }
-    
-    // Debug method to test agent detection specifically
-    [ContextMenu("Test Agent Detection")]
-    public void TestAgentDetection()
-    {
-        Debug.Log("🔍 TESTING AGENT-TO-AGENT DETECTION");
-        
-        if (agents.Length < 2)
-        {
-            Debug.LogError("Need at least 2 agents to test detection!");
+            Debug.LogError("No agents found! Cannot generate spawn points.");
             return;
         }
         
-        // Test detection between first two alive agents
-        int agent1 = -1, agent2 = -1;
-        for (int i = 0; i < agents.Length; i++)
-        {
-            if (agentIsAlive[i])
-            {
-                if (agent1 == -1) agent1 = i;
-                else if (agent2 == -1) { agent2 = i; break; }
-            }
-        }
-        
-        if (agent1 >= 0 && agent2 >= 0)
-        {
-            Debug.Log($"🎯 Testing detection between Agent_{agent1} and Agent_{agent2}");
-            Debug.Log($"Agent_{agent1} position: {agents[agent1].position}");
-            Debug.Log($"Agent_{agent2} position: {agents[agent2].position}");
-            Debug.Log($"Distance: {Vector3.Distance(agents[agent1].position, agents[agent2].position):F2}");
-            
-            // Point agent1 towards agent2
-            Vector3 direction = (agents[agent2].position - agents[agent1].position).normalized;
-            agents[agent1].up = direction;
-            
-            Debug.Log($"🔄 Pointed Agent_{agent1} towards Agent_{agent2}");
-            Debug.Log("🔍 Casting rays to test detection...");
-            Debug.Log($"🆔 CASTING AGENT INDEX: {agent1} (should detect Agent_{agent2} as enemy)");
-            
-            PerformRaycasts(agents[agent1].position, agents[agent1].up, agent1);
-        }
-        else
-        {
-            Debug.LogError("Could not find two alive agents for testing!");
-        }
+        Debug.Log("🔄 Regenerating spawn points...");
+        GenerateSpawnPoints(agents.Length);
+        SpawnAgentsAtSpawnPoints();
     }
     
-    // Debug method to verify agent identification
-    [ContextMenu("Verify Agent Identification")]
-    public void VerifyAgentIdentification()
+    [ContextMenu("Test Random Spawning")]
+    public void TestRandomSpawning()
     {
-        Debug.Log("🆔 VERIFYING AGENT IDENTIFICATION SYSTEM");
-        
-        for (int i = 0; i < agents.Length; i++)
+        if (agents == null || agents.Length == 0)
         {
-            if (agentIsAlive[i])
+            Debug.LogError("No agents found! Cannot test spawning.");
+            return;
+        }
+        
+        Debug.Log("🎲 Testing random spawning...");
+        SpawnAgentsRandomly();
+    }
+    
+    [ContextMenu("Test Spawn Point Spawning")]
+    public void TestSpawnPointSpawning()
+    {
+        if (agents == null || agents.Length == 0)
+        {
+            Debug.LogError("No agents found! Cannot test spawning.");
+            return;
+        }
+        
+        if (spawnPoints == null || spawnPoints.Length == 0)
+        {
+            Debug.Log("No spawn points found, generating them first...");
+            GenerateSpawnPoints(agents.Length);
+        }
+        
+        Debug.Log("📍 Testing spawn point spawning...");
+        SpawnAgentsAtSpawnPoints();
+    }
+    
+    [ContextMenu("Show Spawn Info")]
+    public void ShowSpawnInfo()
+    {
+        Debug.Log("📊 SPAWN SYSTEM INFO:");
+        Debug.Log($"   Dynamic Spawning: {useDynamicSpawning}");
+        Debug.Log($"   Spawn Range X: [{spawnRangeX.x}, {spawnRangeX.y}]");
+        Debug.Log($"   Spawn Range Y: [{spawnRangeY.x}, {spawnRangeY.y}]");
+        Debug.Log($"   Min Distance: {minSpawnDistance}");
+        Debug.Log($"   Auto Generate: {generateSpawnPointsOnStart}");
+        Debug.Log($"   Agent Count: {(agents?.Length ?? 0)}");
+        Debug.Log($"   Spawn Points: {(spawnPoints?.Length ?? 0)}");
+        
+        if (agents != null)
+        {
+            for (int i = 0; i < agents.Length; i++)
             {
-                Debug.Log($"🤖 Agent_{i} at position {agents[i].position}");
-                Debug.Log($"   - Casting rays as Agent_{i}");
-                Debug.Log($"   - Should see other agents as enemies");
-                Debug.Log($"   - Should NOT see self as enemy");
-                
-                // Cast a few rays to test
-                for (int ray = 0; ray < 5; ray++) // Test first 5 rays
-                {
-                    float angle = -90f + (ray * 45f); // Spread rays around
-                    Vector3 direction = Quaternion.Euler(0, 0, angle) * agents[i].up;
-                    RaycastHit2D hit = Physics2D.Raycast(agents[i].position, direction, 10f, wallLayerMask | agentLayerMask);
-                    
-                    if (hit.collider != null)
-                    {
-                        // Check what we hit
-                        for (int a = 0; a < agents.Length; a++)
-                        {
-                            if (hit.collider.transform == agents[a])
-                            {
-                                if (a == i)
-                                {
-                                    Debug.Log($"   ⚠️ Ray {ray} hit SELF (Agent_{a}) - should be GREEN");
-                                }
-                                else if (agentIsAlive[a])
-                                {
-                                    Debug.Log($"   ✅ Ray {ray} hit ENEMY (Agent_{a}) - should be BLUE");
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
+                Debug.Log($"   Agent_{i}: {agents[i].position}");
             }
         }
     }
