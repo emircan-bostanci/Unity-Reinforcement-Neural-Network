@@ -91,28 +91,14 @@ public class GeneticAlgorithmManager : MonoBehaviour
         
         // Check for timeout-based evolution trigger
         bool timeoutTriggered = false;
-        bool immediateRestart = false;
         if (environment != null && environment.GetEpisodeEnded())
         {
             timeoutTriggered = true;
-            
-            // Check if this is due to single agent remaining
-            int aliveCount = environment.GetAliveAgentCount();
-            if (aliveCount <= 1)
-            {
-                immediateRestart = true;
-                Debug.Log($"🔄 Immediate restart triggered - {aliveCount} agents remaining");
-            }
         }
         
         if (enableGeneticAlgorithm && !isEvolving && (generationTimer >= generationDuration || timeoutTriggered))
         {
-            if (immediateRestart)
-            {
-                Debug.Log("🏆 === WINNER DECIDED EVOLUTION ===");
-                Debug.Log("Single agent remaining, immediately starting new generation!");
-            }
-            else if (timeoutTriggered)
+            if (timeoutTriggered)
             {
                 Debug.Log("🚨 === EPISODE ENDED EVOLUTION ===");
                 Debug.Log("Episode ended, forcing generation evolution!");

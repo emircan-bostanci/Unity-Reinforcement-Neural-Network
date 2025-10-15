@@ -110,21 +110,7 @@ public class TrainingManager : MonoBehaviour
             return;
         }
         
-        // Check for excessive reward accumulation
-        if (environment != null)
-        {
-            for (int i = 0; i < environment.GetAgentCount(); i++)
-            {
-                float agentReward = environment.GetReward(i);
-                if (Mathf.Abs(agentReward) > 100f) // Reward too high/low
-                {
-                    Debug.Log($"🚑 EMERGENCY: Agent_{i} reward too high ({agentReward:F1}), forcing reset!");
-                    OnManualEpisodeEnd();
-                    return;
-                }
-            }
-        }
-        
+       
         // Emergency checks and resets
         if (Time.time - episodeStartTime > 30f) // If episode runs longer than 30 seconds
         {
@@ -133,20 +119,6 @@ public class TrainingManager : MonoBehaviour
             return;
         }
         
-        // Check for excessive reward accumulation
-        if (environment != null)
-        {
-            for (int i = 0; i < environment.GetAgentCount(); i++)
-            {
-                float agentReward = environment.GetReward(i);
-                if (Mathf.Abs(agentReward) > 100f) // Reward too high/low
-                {
-                    Debug.Log($"🚑 EMERGENCY: Agent_{i} reward too high ({agentReward:F1}), forcing reset!");
-                    OnManualEpisodeEnd();
-                    return;
-                }
-            }
-        }
 
         // Check if genetic algorithm triggered a new generation (episode reset)
         if (useGeneticAlgorithm && geneticManager != null)
@@ -201,19 +173,16 @@ public class TrainingManager : MonoBehaviour
         
         if (!useGeneticAlgorithm)
         {
-            // Traditional episode management
+            // Traditional episode management - use ONLY the environment's logic
             if (environment.IsEpisodeFinished())
             {
                 shouldEndEpisode = true;
+                Debug.Log("Episode ending - Environment reported finished");
             }
         }
         
-        // Check if only one agent remains alive (restart condition)
-        if (environment != null && environment.GetAliveAgentCount() <= 1)
-        {
-            Debug.Log($"Only {environment.GetAliveAgentCount()} agent(s) remaining - restarting episode!");
-            shouldEndEpisode = true;
-        }
+        // DO NOT add additional alive count check here - let environment handle it
+        // The environment already has proper timing and validation logic
         
         if (shouldEndEpisode)
         {
@@ -297,9 +266,14 @@ public class TrainingManager : MonoBehaviour
                     {
                         // Update agent with current episode (if agent has this property)
                         Debug.Log($"🎯 Episode {currentEpisode} - Agent_{i} Step Reward: {stepReward:F3} (Total: {totalReward:F1})");
+                        
+                        // Call Learn() only if agent is not null
+                        agents[i].Learn(currentState, agentActions[i], stepReward, nextState, environment.IsEpisodeFinished());
                     }
-                    
-                    agents[i].Learn(currentState, agentActions[i], stepReward, nextState, environment.IsEpisodeFinished());
+                    else
+                    {
+                        Debug.LogWarning($"❌ Agent_{i} is null - skipping learning step");
+                    }
                 }
                 catch (System.Exception e)
                 {

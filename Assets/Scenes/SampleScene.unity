@@ -3150,10 +3150,10 @@ MonoBehaviour:
   learningRate: 0.0001
   gamma: 0.99
   lambda: 0.95
-  batchSize: 12
+  batchSize: 64
   resetLSTMOnDeath: 0
-  lstmSequenceLength: 8
-  lstmHiddenSize: 64
+  lstmSequenceLength: 10
+  lstmHiddenSize: 128
   simpleNetwork:
     inputSize: 38
     hiddenSize1: 128
