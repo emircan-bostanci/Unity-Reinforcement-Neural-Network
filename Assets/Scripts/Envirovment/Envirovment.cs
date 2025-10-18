@@ -7,7 +7,7 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
     public Transform[] agents; // All agents in the environment
     public LayerMask wallLayerMask = 1;
     public LayerMask agentLayerMask = 1;
-    public float maxEpisodeLength = 1000f;
+    public float maxEpisodeLength = 15f;
     public float shootRange = 10f;
     public float moveSpeed = 5f;
     public float rotationSpeed = 90f;
@@ -25,7 +25,7 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 
     [Header("Timeout Settings")]
     public float noRewardTimeoutDuration = 5f; // Punish after 5 seconds without reward
-    public bool enableTimeout = true;
+    public bool enableTimeout = false; // DISABLED - No timeout punishment
     public float timeoutPunishment = -30f; // Punishment for timeout
     public bool resetOnTimeout = false; // If true, reset episode; if false, just punish
 
@@ -84,29 +84,9 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         // - NEGATIVE rewards: Do NOT reset timeout timer (penalties) 
         // - All rewards normalized for stable learning
         
-        // Check for timeout punishment first (normalized)
-        float normalizedTimeoutPunishment = -0.3f;
-        if (enableTimeout && !resetOnTimeout && timeSinceLastReward >= noRewardTimeoutDuration && 
-            !hasEarnedRewardThisEpisode && !hasBeenPunishedForTimeout)
-        {
-            reward += normalizedTimeoutPunishment;
-            rewardReason += $"Timeout punishment ({normalizedTimeoutPunishment:F2}) ";
-            hasBeenPunishedForTimeout = true;
-            lastTimeoutPunishmentTime = currentEpisodeTime;
-            Debug.Log($"{agentName} TIMEOUT PUNISHMENT! Agent idle for {timeSinceLastReward:F1} seconds, punishment: {normalizedTimeoutPunishment:F2}");
-        }
+        // Timeout system DISABLED - no timeout punishment
+        // Focus on action-based rewards only
         
-        // Additional punishment every 5 seconds of continued inactivity
-        if (enableTimeout && !resetOnTimeout && hasBeenPunishedForTimeout && 
-            (currentEpisodeTime - lastTimeoutPunishmentTime) >= noRewardTimeoutDuration)
-        {
-            float continuedPunishment = normalizedTimeoutPunishment * 0.5f;
-            reward += continuedPunishment;
-            rewardReason += $"Continued timeout ({continuedPunishment:F2}) ";
-            lastTimeoutPunishmentTime = currentEpisodeTime;
-            Debug.Log($"{agentName} CONTINUED TIMEOUT! Additional punishment: {continuedPunishment:F2}");
-        }
-
         // STRICT EVENT-BASED REWARD SYSTEM - NO CONTINUOUS REWARDS ALLOWED
         
         // 1. Raycast enter bonus - ONE-TIME reward when first spotting enemy
@@ -137,17 +117,17 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         // Proximity rewards removed to prevent continuous accumulation
         // Agents should be rewarded for discrete events, not continuous states
         
-        // Shooting rewards/penalties (normalized)
+        // Shooting rewards/penalties (HIGH IMPACT - NOT NORMALIZED)
         if (agentShotEnemy[agentIndex])
         {
-            reward += 1.0f;  // Maximum positive reward for kills
-            rewardReason += "🏆 KILLED ENEMY (+1.0) ";
-            Debug.Log($"{agentName} 🏆 MAXIMUM KILL REWARD! +1.0 for elimination!");
+            reward += 100.0f;  // MASSIVE reward for kills - much higher than any continuous reward
+            rewardReason += "🏆 KILLED ENEMY (+100.0) ";
+            Debug.Log($"{agentName} 🏆 MASSIVE KILL REWARD! +100.0 for elimination!");
         }
         else if (agentShotNothing[agentIndex])
         {
             reward -= 0.005f;  // Small penalty for missing shots
-            rewardReason += "Shot nothing (-0.05) ";
+            rewardReason += "Shot nothing (-0.005) ";
         }
 
         // Wall collision penalty (normalized)
@@ -168,11 +148,11 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 
         // Penalty for doing nothing or being inactive
         bool isDoingNothing = (lastAction == null || 
-            (lastAction.shoot < 0.1f && 
-             Mathf.Abs(lastAction.moveForward) < 0.1f && 
-             Mathf.Abs(lastAction.moveLeft) < 0.1f && 
-             Mathf.Abs(lastAction.moveRight) < 0.1f && 
-             Mathf.Abs(lastAction.lookAngle) < 0.1f));
+            ( 
+             Mathf.Abs(lastAction.moveForward) < 0.3f && 
+             Mathf.Abs(lastAction.moveLeft) < 0.3 && 
+             Mathf.Abs(lastAction.moveRight) < 0.3f && 
+             Mathf.Abs(lastAction.lookAngle) < 0.3f));
              
         if (isDoingNothing)
         {
@@ -183,8 +163,17 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         // No survival bonus to prevent continuous reward accumulation
         // Agents should be rewarded for actions, not for simply staying alive
         
-        // Clamp final reward to [-1, +1] range for stability
-        reward = Mathf.Clamp(reward, -1f, 1f);
+        // Do NOT clamp kill rewards - let them be much higher than other rewards
+        // Only clamp non-kill rewards to prevent continuous reward inflation
+        if (!rewardReason.Contains("KILLED ENEMY"))
+        {
+            reward = Mathf.Clamp(reward, -1f, 1f);
+        }
+        else
+        {
+            // For kill rewards, only clamp negatives but allow high positive rewards
+            reward = Mathf.Max(reward, -1f);
+        }
         
         // Update cumulative rewards tracking
         agentLastStepRewards[agentIndex] = reward;
@@ -209,10 +198,14 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
                 }
             }
             
-            // Log specific reward breakdown for debugging
-            if (reward > 0.4f) // High rewards that might be combinations
+            // Log HIGH rewards (especially kills) for debugging
+            if (reward > 50f) // High kill rewards
             {
-                Debug.LogWarning($"{agentName} - HIGH REWARD DETECTED: {reward:F3} - Please verify this is correct: {rewardReason}");
+                Debug.LogWarning($"{agentName} - HIGH KILL REWARD: {reward:F1} - This should dominate learning: {rewardReason}");
+            }
+            else if (reward > 0.4f) // Other high rewards that might be combinations
+            {
+                Debug.LogWarning($"{agentName} - MODERATE REWARD: {reward:F3} - Please verify: {rewardReason}");
             }
         }
 
@@ -238,31 +231,72 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 
     public bool IsEpisodeFinished()
     {
-        // Check for normal episode end conditions
-        if (episodeFinished || currentEpisodeTime >= maxEpisodeLength)
+        // Check for manual episode termination first
+        if (episodeFinished)
         {
+            Debug.Log($"Episode manually finished at time {currentEpisodeTime:F1}");
             return true;
         }
         
-        // Check if only one agent remains alive (or none)
-        int aliveCount = 0;
-        for (int i = 0; i < agentIsAlive.Length; i++)
+        // Check for maximum episode length
+        if (currentEpisodeTime >= maxEpisodeLength)
         {
-            if (agentIsAlive[i]) aliveCount++;
-        }
-        
-        if (aliveCount <= 1)
-        {
-            Debug.Log($"Episode finished - Only {aliveCount} agent(s) remaining (Last agent wins or all dead)");
+            Debug.Log($"Episode finished - Maximum length reached ({maxEpisodeLength}s)");
             return true;
         }
         
-        // Check for timeout - only reset episode if resetOnTimeout is true
-        if (enableTimeout && resetOnTimeout && timeSinceLastReward >= noRewardTimeoutDuration && !hasEarnedRewardThisEpisode)
+        // Validate agent arrays before checking alive count
+        if (agentIsAlive == null || agents == null || agentIsAlive.Length != agents.Length)
         {
-            Debug.Log($"Episode timeout reset! {noRewardTimeoutDuration} seconds passed without earning reward.");
-            return true;
+            Debug.LogWarning("Agent arrays inconsistent, avoiding premature reset");
+            return false;
         }
+        
+        // Check if episode should end - only when all agents are dead OR after a reasonable fight duration
+        if (currentEpisodeTime > 5f) // Minimum 5 seconds before allowing episode end
+        {
+            int aliveCount = 0;
+            for (int i = 0; i < agentIsAlive.Length; i++)
+            {
+                if (agentIsAlive[i]) aliveCount++;
+            }
+            
+            // Only end episode if ALL agents are dead
+            if (aliveCount == 0)
+            {
+                Debug.Log($"Episode finished - All agents eliminated after {currentEpisodeTime:F1}s");
+                return true;
+            }
+            
+            // OR if only one agent remains after a short fight (to prevent long episodes)
+            if (aliveCount == 1 && currentEpisodeTime > 5f) // Reset after 5 seconds with single survivor
+            {
+                Debug.Log($"Episode finished - Single survivor after {currentEpisodeTime:F1}s (5 second limit)");
+                return true;
+            }
+            
+            // Log alive count for debugging (less frequently)
+            if (currentEpisodeTime % 5f < 0.1f) // Log every 5 seconds during active play
+            {
+                Debug.Log($"Episode continuing - {aliveCount} agents alive at {currentEpisodeTime:F1}s");
+            }
+        }
+        else
+        {
+            // Log that we're in grace period (less frequently)
+            if (currentEpisodeTime % 2f < 0.1f) // Log every 2 seconds during grace period
+            {
+                int aliveCount = 0;
+                for (int i = 0; i < agentIsAlive.Length; i++)
+                {
+                    if (agentIsAlive[i]) aliveCount++;
+                }
+                Debug.Log($"Grace period: {currentEpisodeTime:F1}s - {aliveCount} agents alive (min 5s before episode can end)");
+            }
+        }
+        
+        // Timeout-based episode ending DISABLED
+        // Episodes end only on time limit or combat completion
         
         return false;
     }
@@ -281,15 +315,40 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
 
     public void Reset()
     {
+        Debug.Log($"🔄 EPISODE RESET - Starting new episode after {currentEpisodeTime:F1}s");
+        
         currentEpisodeTime = 0f;
         lastReward = 0f;
         episodeFinished = false;
         
-        if (agents == null) return;
+        if (agents == null)
+        {
+            Debug.LogError("❌ Cannot reset - agents array is null!");
+            return;
+        }
+        
+        if (agents.Length == 0)
+        {
+            Debug.LogError("❌ Cannot reset - no agents found!");
+            return;
+        }
+        
+        // Validate array lengths before reset
+        if (agentIsAlive == null || agentIsAlive.Length != agents.Length)
+        {
+            Debug.LogWarning("⚠️ Agent tracking arrays length mismatch, reinitializing...");
+            InitializeTrackingArrays(agents.Length);
+        }
         
         // Reset all agent states
         for (int i = 0; i < agents.Length; i++)
         {
+            if (agents[i] == null)
+            {
+                Debug.LogError($"❌ Agent_{i} is null during reset!");
+                continue;
+            }
+            
             agentHitWall[i] = false;
             agentShotEnemy[i] = false;
             agentShotNothing[i] = false;
@@ -603,6 +662,10 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             }
         }
         
+        // DISABLED: Respawning agents during short 5-second episodes is counterproductive
+        // Agents who get kills shouldn't be respawned, and episodes are too short for meaningful respawning
+        // CheckAndRespawnAgents();
+        
         // Update spotting state tracking before resetting flags
         for (int i = 0; i < agents.Length; i++)
         {
@@ -622,46 +685,43 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             agentFacingTowardEnemy[i] = false;
             agentSpottedByEnemy[i] = false; // Reset spotted flag each frame
         }
-        
-        // Reset flags for all agents
-        for (int i = 0; i < agents.Length; i++)
-        {
-            agentHitWall[i] = false;
-            agentShotEnemy[i] = false;
-            agentShotNothing[i] = false;
-            agentSpottedEnemy[i] = false;
-            agentAlreadySpottedThisStep[i] = false;
-            agentHitByEnemy[i] = false;
-            agentHadMeaningfulMovement[i] = false; // Reset movement tracking
-        }
 
         // Apply actions would be called by the training system
         // This method updates the environment state after actions are executed
         
         UpdateState();
         
+        // CALCULATE REWARDS FIRST - BEFORE RESETTING ACTION FLAGS
         // Calculate rewards for all agents and update cumulative tracking
         bool anyMeaningfulReward = false;
         for (int i = 0; i < agents.Length; i++)
         {
             float agentReward = CalculateReward(i);
             
-            // Check if any agent earned meaningful POSITIVE reward to reset timeout
-            // ONLY positive rewards count as meaningful - penalties should NOT reset timeout
-            bool isTimeoutPunishment = (Mathf.Abs(agentReward - (-0.3f)) < 0.01f || Mathf.Abs(agentReward - (-0.15f)) < 0.01f);
-            
-            if (agentReward > 0.02f && !isTimeoutPunishment) // Meaningful positive reward threshold
+            // Track positive rewards (timeout system disabled)
+            if (agentReward > 0.02f)
             {
                 anyMeaningfulReward = true;
             }
         }
         
-        // Update timeout tracking based on any agent earning meaningful POSITIVE reward
+        // Simple timeout tracking (no punishment since timeout disabled)
         if (anyMeaningfulReward)
         {
             timeSinceLastReward = 0f; // Reset timeout timer
             hasEarnedRewardThisEpisode = true;
-            hasBeenPunishedForTimeout = false; // Reset punishment flag
+        }
+        
+        // NOW reset action flags AFTER rewards have been calculated
+        for (int i = 0; i < agents.Length; i++)
+        {
+            agentHitWall[i] = false;
+            agentShotEnemy[i] = false;  // Reset AFTER reward calculation
+            agentShotNothing[i] = false;
+            agentSpottedEnemy[i] = false;
+            agentAlreadySpottedThisStep[i] = false;
+            agentHitByEnemy[i] = false;
+            agentHadMeaningfulMovement[i] = false; // Reset movement tracking
         }
         
         // Update lastReward for legacy compatibility (use average or first agent)
@@ -1063,6 +1123,125 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
             return;
         }
         
+        // Initialize tracking arrays using helper method
+        InitializeTrackingArrays(agentCount);
+        
+        // Generate spawn points if needed
+        if (generateSpawnPointsOnStart || useDynamicSpawning)
+        {
+            GenerateSpawnPoints(agentCount);
+        }
+        
+        Debug.Log($"Environment initialized with {agentCount} agents and {(spawnPoints?.Length ?? 0)} spawn points");
+        Reset();
+    }
+    
+    // Check if dead agents should be respawned to keep training active
+    private void CheckAndRespawnAgents()
+    {
+        // Only consider respawning if episode has been running for a while
+        if (currentEpisodeTime < 5f) return;
+        
+        int aliveCount = GetAliveAgentCount();
+        
+        // If only 1-2 agents remain, consider respawning some dead agents
+        if (aliveCount <= 2 && aliveCount > 0)
+        {
+            int respawnCount = Mathf.Min(2, agents.Length - aliveCount); // Respawn up to 2 agents
+            
+            List<int> deadAgents = new List<int>();
+            for (int i = 0; i < agents.Length; i++)
+            {
+                if (!agentIsAlive[i])
+                {
+                    deadAgents.Add(i);
+                }
+            }
+            
+            // Randomly select agents to respawn
+            for (int i = 0; i < respawnCount && deadAgents.Count > 0; i++)
+            {
+                int randomIndex = Random.Range(0, deadAgents.Count);
+                int agentToRespawn = deadAgents[randomIndex];
+                deadAgents.RemoveAt(randomIndex);
+                
+                RespawnAgent(agentToRespawn);
+                Debug.Log($"🔄 Respawned Agent_{agentToRespawn} to keep training active (alive count was {aliveCount})");
+            }
+        }
+    }
+    
+    // Respawn a specific agent
+    private void RespawnAgent(int agentIndex)
+    {
+        if (agentIndex < 0 || agentIndex >= agents.Length) return;
+        
+        // Mark as alive and reset stats
+        agentIsAlive[agentIndex] = true;
+        agentKills[agentIndex] = 0; // Reset kill count
+        
+        // Revive visually
+        ReviveAgent(agentIndex);
+        
+        // Find a safe spawn position
+        Vector3 spawnPos = FindSafeSpawnPosition();
+        agents[agentIndex].position = spawnPos;
+        agents[agentIndex].rotation = Quaternion.Euler(0, 0, Random.Range(0f, 360f));
+        
+        // Reset agent-specific tracking
+        agentHitWall[agentIndex] = false;
+        agentShotEnemy[agentIndex] = false;
+        agentShotNothing[agentIndex] = false;
+        agentHitByEnemy[agentIndex] = false;
+        agentSpottedEnemy[agentIndex] = false;
+        agentSpottedByEnemy[agentIndex] = false;
+        agentCurrentlySpottingEnemy[agentIndex] = false;
+        agentDistanceToNearestEnemy[agentIndex] = 0f;
+        agentPreviousDistanceToEnemy[agentIndex] = 0f;
+    }
+    
+    // Find a safe position to spawn an agent (away from others)
+    private Vector3 FindSafeSpawnPosition()
+    {
+        for (int attempts = 0; attempts < 20; attempts++)
+        {
+            Vector3 candidatePos = new Vector3(
+                Random.Range(spawnRangeX.x, spawnRangeX.y),
+                Random.Range(spawnRangeY.x, spawnRangeY.y),
+                0f
+            );
+            
+            // Check for obstacles
+            bool hasObstacle = Physics2D.OverlapCircle(candidatePos, 1f, wallLayerMask);
+            if (hasObstacle) continue;
+            
+            // Check distance from alive agents
+            bool tooClose = false;
+            for (int i = 0; i < agents.Length; i++)
+            {
+                if (agentIsAlive[i] && Vector3.Distance(candidatePos, agents[i].position) < minSpawnDistance * 2f)
+                {
+                    tooClose = true;
+                    break;
+                }
+            }
+            
+            if (!tooClose) return candidatePos;
+        }
+        
+        // Fallback: use a random position even if not ideal
+        return new Vector3(
+            Random.Range(spawnRangeX.x, spawnRangeX.y),
+            Random.Range(spawnRangeY.x, spawnRangeY.y),
+            0f
+        );
+    }
+    
+    // Helper method to safely initialize tracking arrays
+    private void InitializeTrackingArrays(int agentCount)
+    {
+        Debug.Log($"🔧 Initializing tracking arrays for {agentCount} agents");
+        
         // Initialize tracking arrays
         agentHitWall = new bool[agentCount];
         agentShotEnemy = new bool[agentCount];
@@ -1085,15 +1264,6 @@ public class Envirovment : MonoBehaviour, IEnvironment, IRewardCalculator
         agentFacingTowardEnemy = new bool[agentCount];
         agentAlreadyGotFacingBonus = new bool[agentCount];
         agentSpottedByEnemy = new bool[agentCount];
-        
-        // Generate spawn points if needed
-        if (generateSpawnPointsOnStart || useDynamicSpawning)
-        {
-            GenerateSpawnPoints(agentCount);
-        }
-        
-        Debug.Log($"Environment initialized with {agentCount} agents and {(spawnPoints?.Length ?? 0)} spawn points");
-        Reset();
     }
 
     // Update is called once per frame

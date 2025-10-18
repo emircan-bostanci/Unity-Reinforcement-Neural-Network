@@ -451,6 +451,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!58 &142105631
 CircleCollider2D:
   m_ObjectHideFlags: 0
@@ -725,6 +728,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &342454524
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -1110,7 +1116,7 @@ MonoBehaviour:
   - {fileID: 1734336162}
   - {fileID: 1393172561}
   geneticManager: {fileID: 1476101746}
-  isTraining: 1
+  isTraining: 0
   trainingStepInterval: 0.002
   maxEpisodes: 999999
   logProgress: 1
@@ -1119,6 +1125,9 @@ MonoBehaviour:
   showEpisodeInfo: 1
   useSharedNetwork: 1
   trainBothAgents: 1
+  enableModelLoading: 0
+  loadBestModelsOnStart: 0
+  switchToEvaluationMode: 0
 --- !u!4 &444995190
 Transform:
   m_ObjectHideFlags: 0
@@ -1146,6 +1155,7 @@ GameObject:
   - component: {fileID: 460013142}
   - component: {fileID: 460013141}
   - component: {fileID: 460013140}
+  - component: {fileID: 460013143}
   m_Layer: 5
   m_Name: Agent_6
   m_TagString: Untagged
@@ -1235,6 +1245,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: C:/Users/emirc/Deep Reinforcement Learning\SavedModels\Elite_Agent_5_Gen_239.json
+  lastLoadedModelInfo: LSTM RNN - Elite_Agent_5_Gen_239.json
+  validateModelBeforeLoading: 1
 --- !u!212 &460013142
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -1293,6 +1306,28 @@ SpriteRenderer:
   m_WasSpriteAssigned: 1
   m_MaskInteraction: 0
   m_SpriteSortPoint: 0
+--- !u!114 &460013143
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 460013138}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8086a8859cbc5954398580426d256d6a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::LSTMNeuralNetwork
+  inputSize: 38
+  lstmHiddenSize: 64
+  outputSize: 5
+  numLayers: 2
+  learningRate: 0.001
+  sequenceLength: 8
+  resetMemoryOnDeath: 0
+  gradientClipping: 1
+  dropoutRate: 0.1
+  enableTraining: 1
 --- !u!1 &519420028
 GameObject:
   m_ObjectHideFlags: 0
@@ -1791,6 +1826,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &632365349
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -2184,6 +2222,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &845268327
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -2652,6 +2693,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &941685628
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -2811,6 +2855,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &958063664
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -3160,6 +3207,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!58 &1364546780
 CircleCollider2D:
   m_ObjectHideFlags: 0
@@ -3297,6 +3347,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &1393172562
 SpriteRenderer:
   m_ObjectHideFlags: 0
@@ -4075,6 +4128,9 @@ MonoBehaviour:
     hiddenSize2: 64
     outputSize: 5
     useValueNetwork: 1
+  lastLoadedModelPath: 
+  lastLoadedModelInfo: 
+  validateModelBeforeLoading: 1
 --- !u!212 &1734336163
 SpriteRenderer:
   m_ObjectHideFlags: 0

@@ -71,6 +71,12 @@ public class TrainingManager : MonoBehaviour
                 return;
             }
         }
+        
+        // Load best models if enabled
+        if (enableModelLoading && loadBestModelsOnStart)
+        {
+            LoadBestModelsIntoAllAgents();
+        }
 
         // Only start episodes manually if not using genetic algorithm
         if (!useGeneticAlgorithm)
@@ -97,8 +103,14 @@ public class TrainingManager : MonoBehaviour
 
     void Update()
     {
+        // If not training, check if we should still run inference for loaded models
         if (!isTraining)
         {
+            if (allowInferenceWhenNotTraining && HasAnyLoadedModels())
+            {
+                // Run inference-only mode (no training, no episode management)
+                RunInferenceMode();
+            }
             return;
         }
         
@@ -110,21 +122,7 @@ public class TrainingManager : MonoBehaviour
             return;
         }
         
-        // Check for excessive reward accumulation
-        if (environment != null)
-        {
-            for (int i = 0; i < environment.GetAgentCount(); i++)
-            {
-                float agentReward = environment.GetReward(i);
-                if (Mathf.Abs(agentReward) > 100f) // Reward too high/low
-                {
-                    Debug.Log($"🚑 EMERGENCY: Agent_{i} reward too high ({agentReward:F1}), forcing reset!");
-                    OnManualEpisodeEnd();
-                    return;
-                }
-            }
-        }
-        
+       
         // Emergency checks and resets
         if (Time.time - episodeStartTime > 30f) // If episode runs longer than 30 seconds
         {
@@ -133,20 +131,6 @@ public class TrainingManager : MonoBehaviour
             return;
         }
         
-        // Check for excessive reward accumulation
-        if (environment != null)
-        {
-            for (int i = 0; i < environment.GetAgentCount(); i++)
-            {
-                float agentReward = environment.GetReward(i);
-                if (Mathf.Abs(agentReward) > 100f) // Reward too high/low
-                {
-                    Debug.Log($"🚑 EMERGENCY: Agent_{i} reward too high ({agentReward:F1}), forcing reset!");
-                    OnManualEpisodeEnd();
-                    return;
-                }
-            }
-        }
 
         // Check if genetic algorithm triggered a new generation (episode reset)
         if (useGeneticAlgorithm && geneticManager != null)
@@ -201,19 +185,16 @@ public class TrainingManager : MonoBehaviour
         
         if (!useGeneticAlgorithm)
         {
-            // Traditional episode management
+            // Traditional episode management - use ONLY the environment's logic
             if (environment.IsEpisodeFinished())
             {
                 shouldEndEpisode = true;
+                Debug.Log("Episode ending - Environment reported finished");
             }
         }
         
-        // Check if only one agent remains alive (restart condition)
-        if (environment != null && environment.GetAliveAgentCount() <= 1)
-        {
-            Debug.Log($"Only {environment.GetAliveAgentCount()} agent(s) remaining - restarting episode!");
-            shouldEndEpisode = true;
-        }
+        // DO NOT add additional alive count check here - let environment handle it
+        // The environment already has proper timing and validation logic
         
         if (shouldEndEpisode)
         {
@@ -297,9 +278,14 @@ public class TrainingManager : MonoBehaviour
                     {
                         // Update agent with current episode (if agent has this property)
                         Debug.Log($"🎯 Episode {currentEpisode} - Agent_{i} Step Reward: {stepReward:F3} (Total: {totalReward:F1})");
+                        
+                        // Call Learn() only if agent is not null
+                        agents[i].Learn(currentState, agentActions[i], stepReward, nextState, environment.IsEpisodeFinished());
                     }
-                    
-                    agents[i].Learn(currentState, agentActions[i], stepReward, nextState, environment.IsEpisodeFinished());
+                    else
+                    {
+                        Debug.LogWarning($"❌ Agent_{i} is null - skipping learning step");
+                    }
                 }
                 catch (System.Exception e)
                 {
@@ -483,6 +469,12 @@ public class TrainingManager : MonoBehaviour
         );
     }
 
+    [Header("Model Loading Settings")]
+    [SerializeField] private bool enableModelLoading = false;
+    [SerializeField] private bool loadBestModelsOnStart = false;
+    [SerializeField] private bool switchToEvaluationMode = false; // Disable training when models are loaded
+    [SerializeField] private bool allowInferenceWhenNotTraining = true; // Allow agents to act even when training is disabled
+    
     // Public methods for external control
     public void StartTraining()
     {
@@ -490,13 +482,251 @@ public class TrainingManager : MonoBehaviour
         currentEpisode = 0;
         StartNewEpisode();
     }
-
+    
     public void StopTraining()
     {
         isTraining = false;
     }
-
-    public void ResetTraining()
+    
+    /// <summary>
+    /// Load best available models into all agents
+    /// </summary>
+    [ContextMenu("Load Best Models Into All Agents")]
+    public void LoadBestModelsIntoAllAgents()
+    {
+        if (agents == null || agents.Length == 0)
+        {
+            Debug.LogWarning("⚠️ TrainingManager: No agents found to load models into");
+            return;
+        }
+        
+        int successCount = 0;
+        
+        foreach (Agent agent in agents)
+        {
+            if (agent != null)
+            {
+                // Use the agent's built-in method to load the best available model
+                agent.LoadBestAvailableModel();
+                
+                if (agent.HasLoadedModel())
+                {
+                    successCount++;
+                }
+            }
+        }
+        
+        Debug.Log($"✅ TrainingManager: Loaded models into {successCount}/{agents.Length} agents");
+        
+        if (switchToEvaluationMode && successCount > 0)
+        {
+            SwitchToEvaluationMode();
+        }
+    }
+    
+    /// <summary>
+    /// Switch to evaluation mode (disable training, enable model inference)
+    /// </summary>
+    [ContextMenu("Switch to Evaluation Mode")]
+    public void SwitchToEvaluationMode()
+    {
+        isTraining = false;
+        allowInferenceWhenNotTraining = true; // Ensure inference is enabled
+        
+        if (agents != null)
+        {
+            foreach (Agent agent in agents)
+            {
+                if (agent != null)
+                {
+                    // Disable random actions for evaluation
+                    agent.useRandomActions = false;
+                    agent.explorationNoise = 0f;
+                }
+            }
+        }
+        
+        Debug.Log("🔬 TrainingManager: Switched to evaluation mode - training disabled, using loaded models for inference");
+        
+        // Log current status
+        int agentsWithModels = 0;
+        if (agents != null)
+        {
+            foreach (Agent agent in agents)
+            {
+                if (agent != null && agent.HasLoadedModel())
+                    agentsWithModels++;
+            }
+        }
+        
+        Debug.Log($"📊 Evaluation Status: {agentsWithModels}/{agents?.Length ?? 0} agents have loaded models");
+    }
+    
+    /// <summary>
+    /// Switch back to training mode
+    /// </summary>
+    [ContextMenu("Switch to Training Mode")]
+    public void SwitchToTrainingMode()
+    {
+        isTraining = true;
+        
+        if (agents != null)
+        {
+            foreach (Agent agent in agents)
+            {
+                if (agent != null)
+                {
+                    // Re-enable exploration for training
+                    agent.useRandomActions = false; // Keep false but enable noise
+                    agent.explorationNoise = 0.1f; // Default exploration noise
+                }
+            }
+        }
+        
+        Debug.Log("🎯 TrainingManager: Switched to training mode - agents will continue learning");
+    }
+    
+    /// <summary>
+    /// Toggle inference mode when not training
+    /// </summary>
+    [ContextMenu("Toggle Inference Mode")]
+    public void ToggleInferenceMode()
+    {
+        allowInferenceWhenNotTraining = !allowInferenceWhenNotTraining;
+        
+        string status = allowInferenceWhenNotTraining ? "ENABLED" : "DISABLED";
+        Debug.Log($"🔄 TrainingManager: Inference mode when not training is now {status}");
+        
+        if (!isTraining && allowInferenceWhenNotTraining)
+        {
+            Debug.Log("💡 Agents with loaded models will now act even when training is disabled");
+        }
+        else if (!allowInferenceWhenNotTraining)
+        {
+            Debug.Log("⏸️ Agents will not act when training is disabled");
+        }
+    }
+    
+    /// <summary>
+    /// Clear all loaded models and reinitialize networks
+    /// </summary>
+    [ContextMenu("Clear All Loaded Models")]
+    public void ClearAllLoadedModels()
+    {
+        if (agents == null || agents.Length == 0)
+        {
+            Debug.LogWarning("⚠️ TrainingManager: No agents found");
+            return;
+        }
+        
+        foreach (Agent agent in agents)
+        {
+            if (agent != null)
+            {
+                agent.ClearLoadedModel();
+            }
+        }
+        
+        Debug.Log("🔄 TrainingManager: Cleared all loaded models from agents");
+    }
+    
+    /// <summary>
+    /// Show status of all agents including loaded models
+    /// </summary>
+    [ContextMenu("Show Agent Model Status")]
+    public void ShowAgentModelStatus()
+    {
+        if (agents == null || agents.Length == 0)
+        {
+            Debug.LogWarning("⚠️ TrainingManager: No agents found");
+            return;
+        }
+        
+        Debug.Log("=== AGENT MODEL STATUS ===");
+        for (int i = 0; i < agents.Length; i++)
+        {
+            if (agents[i] != null)
+            {
+                string modelInfo = agents[i].GetLoadedModelInfo();
+                bool hasModel = agents[i].HasLoadedModel();
+                string networkType = agents[i].networkType.ToString();
+                bool isTrainingEnabled = !agents[i].useRandomActions;
+                
+                Debug.Log($"Agent {i} ({agents[i].name}):");
+                Debug.Log($"  Network: {networkType}");
+                Debug.Log($"  Model: {modelInfo}");
+                Debug.Log($"  Has Loaded Model: {hasModel}");
+                Debug.Log($"  Training Mode: {(isTrainingEnabled ? "Active" : "Random Actions")}");
+                Debug.Log($"  Exploration Noise: {agents[i].explorationNoise:F3}");
+            }
+        }
+        
+        Debug.Log($"Training Manager - Is Training: {isTraining}");
+        Debug.Log($"Allow Inference When Not Training: {allowInferenceWhenNotTraining}");
+        Debug.Log($"Has Loaded Models: {HasAnyLoadedModels()}");
+        Debug.Log($"Current Episode: {currentEpisode}");
+    }
+    
+    /// <summary>
+    /// Check if any agents have loaded models
+    /// </summary>
+    private bool HasAnyLoadedModels()
+    {
+        if (agents == null || agents.Length == 0)
+            return false;
+            
+        foreach (Agent agent in agents)
+        {
+            if (agent != null && agent.HasLoadedModel())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /// <summary>
+    /// Run inference-only mode for loaded models without training
+    /// </summary>
+    private void RunInferenceMode()
+    {
+        if (Time.time - lastTrainingStep < trainingStepInterval)
+            return;
+            
+        // Get current state
+        currentState = environment.GetCurrentState();
+        
+        if (currentState == null)
+        {
+            Debug.LogError("Current state is null in inference mode!");
+            return;
+        }
+        
+        // Get actions from agents with loaded models
+        for (int i = 0; i < agents.Length; i++)
+        {
+            if (environment.IsAgentAlive(i) && agents[i] != null && agents[i].HasLoadedModel())
+            {
+                try
+                {
+                    Action agentAction = agents[i].SelectAction(currentState);
+                    if (agentAction != null)
+                    {
+                        environment.ApplyAction(agentAction, i);
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"Error getting action from agent {i} in inference mode: {e.Message}");
+                }
+            }
+        }
+        
+        // Step environment
+        environment.Step();
+        
+        lastTrainingStep = Time.time;
+    }    public void ResetTraining()
     {
         currentEpisode = 0;
         lastGeneticGeneration = -1;

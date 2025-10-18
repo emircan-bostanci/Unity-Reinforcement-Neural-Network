@@ -117,20 +117,63 @@ public class Agent : MonoBehaviour, IAgent
 
     public Action SelectAction(State state)
     {
+        // If random actions are enabled and we don't have a loaded model, use random
+        if (useRandomActions && !HasLoadedModel())
+        {
+            return GenerateRandomAction();
+        }
+        
+        // If we have a loaded model, always try to use it (even if useRandomActions is true)
+        if (HasLoadedModel())
+        {
+            // Convert state to array for neural network
+            float[] stateData = state.ToArray();
+            
+            // Get network output
+            float[] networkOutput = GetNetworkOutput(stateData);
+            
+            if (networkOutput != null)
+            {
+                // Add exploration noise if enabled (but usually disabled in evaluation)
+                if (explorationNoise > 0f)
+                {
+                    for (int i = 0; i < networkOutput.Length; i++)
+                    {
+                        networkOutput[i] += Random.Range(-explorationNoise, explorationNoise);
+                    }
+                }
+                
+                // Convert network output to action
+                Action modelAction = new Action
+                {
+                    lookAngle = Mathf.Clamp(networkOutput[0], -1f, 1f),
+                    shoot = networkOutput[1] > 0.1f ? 1f : 0f,
+                    moveForward = Mathf.Clamp(networkOutput[2], 0f, 1f),
+                    moveLeft = Mathf.Clamp(networkOutput[3], -1f, 1f),
+                    moveRight = Mathf.Clamp(networkOutput[4], -1f, 1f)
+                };
+                
+                return modelAction;
+            }
+            else
+            {
+                Debug.LogWarning($"{gameObject.name}: Network output is null despite having loaded model, using fallback");
+            }
+        }
+        
+        // Fallback: if useRandomActions is enabled or no valid network output
         if (useRandomActions)
         {
             return GenerateRandomAction();
         }
         
-        // Convert state to array for neural network
+        // Last resort: try to get network output even without loaded model
         float[] stateArray = state.ToArray();
-        
-        // Get network output
         float[] policyOutput = GetNetworkOutput(stateArray);
         
         if (policyOutput == null)
         {
-            Debug.LogWarning($"Network output is null for {networkType}, using random action");
+            Debug.LogWarning($"{gameObject.name}: Network output is null for {networkType}, using random action");
             return GenerateRandomAction();
         }
         
@@ -436,26 +479,198 @@ public class Agent : MonoBehaviour, IAgent
         }
     }
     
+    [Header("Model Loading")]
+    [SerializeField] private string lastLoadedModelPath = "";
+    [SerializeField] private string lastLoadedModelInfo = "";
+    [SerializeField] private bool validateModelBeforeLoading = true;
+    
     public void LoadModel(string filePath)
     {
-        switch (networkType)
+        if (string.IsNullOrEmpty(filePath))
         {
-            case NeuralNetworkType.SimpleNN:
-                if (simpleNetwork != null)
-                {
-                    // SimpleNeuralNetwork uses LoadWeights method  
-                    simpleNetwork.LoadWeights(filePath);
-                    Debug.Log($"📁 Simple NN weights loaded from {filePath}");
-                }
-                break;
-            case NeuralNetworkType.LSTM_RNN:
-                if (lstmNetwork != null)
-                {
-                    lstmNetwork.LoadModel(filePath);
-                    Debug.Log($"📁 LSTM model loaded from {filePath}");
-                }
-                break;
+            Debug.LogError($"❌ {gameObject.name}: Cannot load model - file path is empty");
+            return;
         }
+        
+        if (!System.IO.File.Exists(filePath))
+        {
+            Debug.LogError($"❌ {gameObject.name}: Model file not found: {filePath}");
+            return;
+        }
+        
+        if (validateModelBeforeLoading && !ValidateModelFile(filePath))
+        {
+            Debug.LogError($"❌ {gameObject.name}: Model validation failed for: {filePath}");
+            return;
+        }
+        
+        try
+        {
+            switch (networkType)
+            {
+                case NeuralNetworkType.SimpleNN:
+                    if (simpleNetwork == null)
+                    {
+                        Debug.LogWarning($"⚠️ {gameObject.name}: SimpleNetwork is null, initializing...");
+                        InitializeSelectedNetwork();
+                    }
+                    
+                    if (simpleNetwork != null)
+                    {
+                        simpleNetwork.LoadWeights(filePath);
+                        lastLoadedModelPath = filePath;
+                        lastLoadedModelInfo = $"Simple NN - {System.IO.Path.GetFileName(filePath)}";
+                        Debug.Log($"✅ {gameObject.name}: Simple NN weights loaded from {System.IO.Path.GetFileName(filePath)}");
+                    }
+                    else
+                    {
+                        Debug.LogError($"❌ {gameObject.name}: Failed to initialize SimpleNetwork");
+                    }
+                    break;
+                    
+                case NeuralNetworkType.LSTM_RNN:
+                    if (lstmNetwork == null)
+                    {
+                        Debug.LogWarning($"⚠️ {gameObject.name}: LSTM Network is null, initializing...");
+                        InitializeSelectedNetwork();
+                    }
+                    
+                    if (lstmNetwork != null)
+                    {
+                        lstmNetwork.LoadModel(filePath);
+                        lastLoadedModelPath = filePath;
+                        lastLoadedModelInfo = $"LSTM RNN - {System.IO.Path.GetFileName(filePath)}";
+                        Debug.Log($"✅ {gameObject.name}: LSTM model loaded from {System.IO.Path.GetFileName(filePath)}");
+                    }
+                    else
+                    {
+                        Debug.LogError($"❌ {gameObject.name}: Failed to initialize LSTM Network");
+                    }
+                    break;
+                    
+                default:
+                    Debug.LogError($"❌ {gameObject.name}: Unknown network type: {networkType}");
+                    break;
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"❌ {gameObject.name}: Exception while loading model from {filePath}: {e.Message}");
+            Debug.LogException(e);
+        }
+    }
+    
+    /// <summary>
+    /// Load model with additional validation and error reporting
+    /// </summary>
+    public bool LoadModelSafe(string filePath, bool logSuccess = true)
+    {
+        if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath))
+        {
+            if (logSuccess) Debug.LogError($"❌ {gameObject.name}: Invalid file path for model loading");
+            return false;
+        }
+        
+        try
+        {
+            LoadModel(filePath);
+            if (logSuccess) Debug.Log($"✅ {gameObject.name}: Model loaded successfully");
+            return true;
+        }
+        catch (System.Exception e)
+        {
+            if (logSuccess) Debug.LogError($"❌ {gameObject.name}: Failed to load model: {e.Message}");
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Validate model file before loading
+    /// </summary>
+    private bool ValidateModelFile(string filePath)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(filePath))
+                return false;
+                
+            System.IO.FileInfo fileInfo = new System.IO.FileInfo(filePath);
+            
+            // Check file size (neural network models should be at least a few KB)
+            if (fileInfo.Length < 100)
+            {
+                Debug.LogWarning($"⚠️ {gameObject.name}: Model file is very small ({fileInfo.Length} bytes), may be corrupted");
+                return false;
+            }
+            
+            // Check if file is readable JSON
+            string content = System.IO.File.ReadAllText(filePath);
+            if (string.IsNullOrEmpty(content))
+            {
+                Debug.LogWarning($"⚠️ {gameObject.name}: Model file is empty");
+                return false;
+            }
+            
+            // Basic JSON validation
+            if (!content.Trim().StartsWith("{") || !content.Trim().EndsWith("}"))
+            {
+                Debug.LogWarning($"⚠️ {gameObject.name}: Model file doesn't appear to be valid JSON");
+                return false;
+            }
+            
+            // Check for expected neural network data
+            if (!content.Contains("weight") && !content.Contains("layer"))
+            {
+                Debug.LogWarning($"⚠️ {gameObject.name}: Model file doesn't contain expected neural network data");
+                return false;
+            }
+            
+            return true;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"⚠️ {gameObject.name}: Error validating model file: {e.Message}");
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Switch network type and optionally load a model
+    /// </summary>
+    public bool SwitchNetworkTypeAndLoadModel(NeuralNetworkType newNetworkType, string modelPath = null)
+    {
+        if (networkType != newNetworkType)
+        {
+            networkType = newNetworkType;
+            InitializeSelectedNetwork();
+            Debug.Log($"🔄 {gameObject.name}: Switched to {networkType}");
+        }
+        
+        if (!string.IsNullOrEmpty(modelPath))
+        {
+            return LoadModelSafe(modelPath);
+        }
+        
+        return true;
+    }
+    
+    /// <summary>
+    /// Get information about the currently loaded model
+    /// </summary>
+    public string GetLoadedModelInfo()
+    {
+        if (string.IsNullOrEmpty(lastLoadedModelInfo))
+            return "No model loaded";
+            
+        return lastLoadedModelInfo;
+    }
+    
+    /// <summary>
+    /// Check if agent has a loaded model
+    /// </summary>
+    public bool HasLoadedModel()
+    {
+        return !string.IsNullOrEmpty(lastLoadedModelPath) && System.IO.File.Exists(lastLoadedModelPath);
     }
     
     // Context menu debug methods
@@ -489,6 +704,105 @@ public class Agent : MonoBehaviour, IAgent
         }
     }
     
+    [ContextMenu("Show Loaded Model Info")]
+    public void ShowLoadedModelInfo()
+    {
+        Debug.Log($"📋 {gameObject.name} Model Info:");
+        Debug.Log($"   Network Type: {networkType}");
+        Debug.Log($"   Loaded Model: {GetLoadedModelInfo()}");
+        Debug.Log($"   Model Path: {(string.IsNullOrEmpty(lastLoadedModelPath) ? "None" : lastLoadedModelPath)}");
+        Debug.Log($"   Has Loaded Model: {HasLoadedModel()}");
+        Debug.Log($"   Validation Enabled: {validateModelBeforeLoading}");
+    }
+    
+    [ContextMenu("Load Best Available Model")]
+    public void LoadBestAvailableModel()
+    {
+        // Simple approach: try to load the most recent model from SavedModels directory
+        string projectPath = Application.dataPath.Replace("/Assets", "");
+        string savedModelsPath = System.IO.Path.Combine(projectPath, "SavedModels");
+        
+        if (!System.IO.Directory.Exists(savedModelsPath))
+        {
+            Debug.LogError($"❌ {gameObject.name}: SavedModels directory not found at: {savedModelsPath}");
+            return;
+        }
+        
+        string[] jsonFiles = System.IO.Directory.GetFiles(savedModelsPath, "*.json");
+        
+        if (jsonFiles.Length == 0)
+        {
+            Debug.LogWarning($"⚠️ {gameObject.name}: No model files found in SavedModels directory");
+            return;
+        }
+        
+        // Sort by file modification time (most recent first)
+        System.Array.Sort(jsonFiles, (x, y) => System.IO.File.GetLastWriteTime(y).CompareTo(System.IO.File.GetLastWriteTime(x)));
+        
+        // Try to find a model for our agent index if possible
+        int agentIndex = -1;
+        string agentName = gameObject.name.ToLower();
+        
+        if (agentName.Contains("agent"))
+        {
+            string[] parts = agentName.Split('_');
+            foreach (string part in parts)
+            {
+                if (int.TryParse(part, out int index))
+                {
+                    agentIndex = index;
+                    break;
+                }
+            }
+        }
+        
+        string bestModelPath = null;
+        
+        // First, try to find a model for our specific agent
+        if (agentIndex >= 0)
+        {
+            foreach (string filePath in jsonFiles)
+            {
+                string fileName = System.IO.Path.GetFileName(filePath);
+                if (fileName.Contains($"Agent_{agentIndex}_"))
+                {
+                    bestModelPath = filePath;
+                    break;
+                }
+            }
+        }
+        
+        // If no specific model found, use the most recent one
+        if (bestModelPath == null && jsonFiles.Length > 0)
+        {
+            bestModelPath = jsonFiles[0];
+        }
+        
+        if (bestModelPath != null)
+        {
+            if (LoadModelSafe(bestModelPath))
+            {
+                Debug.Log($"✅ {gameObject.name}: Loaded best available model: {System.IO.Path.GetFileName(bestModelPath)}");
+            }
+        }
+        else
+        {
+            Debug.LogWarning($"⚠️ {gameObject.name}: No suitable model found to load");
+        }
+    }
+    
+    [ContextMenu("Clear Loaded Model")]
+    public void ClearLoadedModel()
+    {
+        lastLoadedModelPath = "";
+        lastLoadedModelInfo = "";
+        
+        // Reinitialize the network to clear any loaded weights
+        InitializeSelectedNetwork();
+        
+        Debug.Log($"🔄 {gameObject.name}: Cleared loaded model and reinitialized network");
+    }
+    
     [ContextMenu("Log Performance Stats")]
     public void LogPerformanceStats()
     {
@@ -499,6 +813,7 @@ public class Agent : MonoBehaviour, IAgent
         Debug.Log($"   Average Reward: {(episodeCount > 0 ? totalReward / episodeCount : 0):F2}");
         Debug.Log($"   Current Time Alive: {timeAlive:F1}s");
         Debug.Log($"   Experience Buffer: {experienceBuffer.Count}");
+        Debug.Log($"   Loaded Model: {GetLoadedModelInfo()}");
         
         if (networkType == NeuralNetworkType.LSTM_RNN && lstmNetwork != null)
         {
